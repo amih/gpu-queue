@@ -21,6 +21,11 @@ const DEFAULTS = {
   ageStepSeconds: [0, 600, 600],
   // How long the model already on the card is preferred while others wait.
   batchSeconds: 300,
+  // After a job ends, its program keeps first claim on the card this long, so work that
+  // comes in steps is not overtaken by lower-priority work in the gaps.
+  graceSeconds: 30,
+  // Which GPU processes belong to which backend (matched against nvidia-smi's names).
+  procMatch: { ollama: 'ollama', comfy: 'comfy' },
   // The card counts as empty below this much used memory (MiB).
   emptyMiB: 1200,
   historySize: 500,
@@ -51,8 +56,8 @@ const priorityOf = (client) => state.clients[client]?.priority || cfg.clients[cl
 const backends = makeBackends(cfg);
 const sched = new Scheduler({
   backends,
-  waitForMemory: memoryWaiter(cfg.emptyMiB),
-  settings: { ageStepSeconds: cfg.ageStepSeconds, batchSeconds: cfg.batchSeconds, historySize: cfg.historySize },
+  waitForMemory: memoryWaiter(cfg.emptyMiB, cfg.procMatch),
+  settings: { ageStepSeconds: cfg.ageStepSeconds, batchSeconds: cfg.batchSeconds, graceSeconds: cfg.graceSeconds, historySize: cfg.historySize },
   log,
 });
 sched.paused = !!state.paused;

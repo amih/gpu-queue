@@ -9,6 +9,7 @@ gpu-queue sits between those programs and the card. Every piece of GPU work wait
 - **No more out-of-memory clashes.** Two models that don't fit together never run together.
 - **Priorities.** A web page where someone is waiting goes before a batch job, and a batch job goes before bulk background work.
 - **Nothing waits forever.** A job that waits 10 minutes moves up one level, so background work still gets the card between busy periods.
+- **Programs that work in steps keep their turn.** A program that reads a photo, thinks on the CPU, then reads the next keeps first claim on the card for a short grace period after each step, so lower-priority work doesn't slip into every gap.
 - **Fewer model reloads.** Loading a model costs 10–30 seconds, so the model already on the card is preferred for a while when others of the same priority wait.
 - **A status page** that shows what holds the card, who is waiting and for how long, and how long each program usually waits. From it you can pause the queue, cancel a waiting job, or change a priority.
 - **No changes to your apps.** Point their Ollama or ComfyUI address at the queue. Anything else (an upscaler, whisper, a training script) runs through a one-line wrapper.
@@ -37,6 +38,7 @@ Every request that needs the card becomes a job. A job belongs to a group: one O
 - **Jobs of the same group run side by side** (up to a limit per backend), because they share the model that is already loaded.
 - **Jobs of different groups never overlap.** When the card goes to another group, gpu-queue waits for the running jobs to finish and frees the memory. Ollama's models are unloaded (`keep_alive: 0`) and ComfyUI is told to free its memory (`POST /free`). Then it waits until the card's memory is almost empty (read from `nvidia-smi`) before starting the next job.
 - **Order:** priority first, then the group already on the card (for up to `batchSeconds`), then arrival time.
+- **Grace period:** when the card goes idle, the group that just used it keeps first claim for `graceSeconds` against lower-priority work.
 - **No preemption.** A running job is never stopped. A higher-priority job waits for the running ones to finish, but nothing new of a lower priority starts before it.
 
 Requests that don't load a model go straight through: listing models, unloading one, or a model forced onto the CPU with `num_gpu: 0`.
@@ -112,7 +114,9 @@ Environment:
 | `comfy.concurrency` | `1` | prompts handed to ComfyUI at once |
 | `ageStepSeconds` | `[0, 600, 600]` | seconds of waiting before `normal` and `background` jobs move up one level |
 | `batchSeconds` | `300` | how long the loaded model is preferred while others wait |
-| `emptyMiB` | `1200` | the card counts as empty below this much used memory |
+| `graceSeconds` | `30` | after a job ends, its group keeps first claim this long against lower priorities |
+| `emptyMiB` | `1200` | the card counts as empty below this much used memory, not counting the memory of the program taking over |
+| `procMatch` | `{"ollama":"ollama","comfy":"comfy"}` | how to recognise each backend's processes in `nvidia-smi` |
 | `clients` | | `{ "name": { "priority": "...", "note": "..." } }` |
 
 ### As a service

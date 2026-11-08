@@ -50,6 +50,7 @@ before(async () => {
   writeFileSync(join(dir, 'config.json'), JSON.stringify({
     ollama: { url: `http://127.0.0.1:${ollama.address().port}`, concurrency: 2 },
     comfy: { url: `http://127.0.0.1:${comfy.address().port}`, concurrency: 1 },
+    graceSeconds: 1,
     clients: { web: { priority: 'interactive' }, batch: { priority: 'normal' }, bulk: { priority: 'background' } },
   }));
   PROXY = 39000 + Math.floor(Math.random() * 500);
@@ -99,6 +100,17 @@ test('higher priority goes first; background is not started while others wait', 
   await Promise.all([lock, bulk, web]);
   const i = (e) => events.indexOf(e);
   assert.ok(i('ollama start chat fg') < i('ollama start embed bg'), events.join('\n'));
+});
+
+test('a program working in steps keeps the card during short gaps', async () => {
+  events.length = 0;
+  await gen('batch', 'vision', 's1', 100);
+  const bulk = gen('bulk', 'embed', 'gap', 10);     // arrives in the gap
+  await sleep(300);
+  await gen('batch', 'vision', 's2', 100);          // next step, still within the grace period
+  await bulk;
+  const i = (e) => events.indexOf(e);
+  assert.ok(i('ollama start vision s2') < i('ollama start embed gap'), events.join('\n'));
 });
 
 test('a lease waits for running work and holds the card until released', async () => {
