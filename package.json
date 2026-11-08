@@ -1,0 +1,11 @@
+{
+  "name": "gpu-queue",
+  "version": "0.1.0",
+  "description": "One queue, with priorities, for every program that shares one small GPU: Ollama, ComfyUI and any command line tool.",
+  "type": "module",
+  "main": "server.js",
+  "bin": { "gpu-lease": "bin/gpu-lease" },
+  "scripts": { "start": "node server.js", "test": "node --test test/*.test.js" },
+  "engines": { "node": ">=20" },
+  "license": "MIT"
+}

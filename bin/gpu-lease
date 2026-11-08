@@ -1,0 +1,63 @@
+#!/usr/bin/env node
+// Runs a command once the GPU queue gives it the card, and gives the card back when the
+// command ends.
+//
+//   gpu-lease [-c client] [-p interactive|normal|background] [-l label] [--strict] -- command [args...]
+//
+// GPU_QUEUE_URL (default http://127.0.0.1:3890) says where the queue is. If the queue
+// cannot be reached the command runs anyway, with a warning; --strict makes that an error.
+import http from 'node:http';
+import { spawn } from 'node:child_process';
+import { basename } from 'node:path';
+
+const args = process.argv.slice(2);
+const opts = { client: null, priority: null, label: null, strict: false };
+while (args.length && args[0] !== '--') {
+  const a = args.shift();
+  if (a === '-c' || a === '--client') opts.client = args.shift();
+  else if (a === '-p' || a === '--priority') opts.priority = args.shift();
+  else if (a === '-l' || a === '--label') opts.label = args.shift();
+  else if (a === '--strict') opts.strict = true;
+  else if (a === '-h' || a === '--help') usage(0);
+  else { args.unshift(a); break; }
+}
+if (args[0] === '--') args.shift();
+if (!args.length) usage(2);
+
+function usage(code) {
+  console.error('usage: gpu-lease [-c client] [-p interactive|normal|background] [-l label] [--strict] -- command [args...]');
+  process.exit(code);
+}
+
+const base = new URL(process.env.GPU_QUEUE_URL || 'http://127.0.0.1:3890');
+const q = new URLSearchParams({ client: opts.client || basename(args[0]), label: opts.label || args.map(basename).join(' ').slice(0, 120) });
+if (opts.priority) q.set('priority', opts.priority);
+
+let child = null;
+const run = (req) => {
+  child = spawn(args[0], args.slice(1), { stdio: 'inherit' });
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => child.kill(sig));
+  child.on('error', (e) => { console.error(`gpu-lease: ${e.message}`); req?.destroy(); process.exit(127); });
+  child.on('exit', (code, sig) => { req?.destroy(); process.exit(code ?? (sig ? 128 : 1)); });
+};
+
+const req = http.request(new URL(`/lease?${q}`, base), { method: 'POST' }, (res) => {
+  let buf = '';
+  res.setEncoding('utf8');
+  res.on('data', (chunk) => {
+    if (child) return;
+    buf += chunk;
+    if (/^granted /m.test(buf)) run(req);
+    else if (/^refused /m.test(buf)) { console.error(`gpu-lease: ${buf.match(/^refused (.*)$/m)[1]}`); process.exit(75); }
+  });
+  res.on('end', () => { if (!child) { console.error('gpu-lease: the queue closed the lease'); process.exit(75); } });
+});
+req.on('error', (e) => {
+  if (child) return;
+  if (opts.strict) { console.error(`gpu-lease: queue unreachable (${e.message})`); process.exit(75); }
+  console.error(`gpu-lease: queue unreachable (${e.message}); running without it`);
+  run(null);
+});
+req.end();
+// Waiting for the card: a signal cancels the wait.
+for (const sig of ['SIGINT', 'SIGTERM']) process.once(sig, () => { if (!child) { req.destroy(); process.exit(130); } });

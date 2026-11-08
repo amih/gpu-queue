@@ -1,0 +1,13 @@
+{
+  "ollama": { "url": "http://127.0.0.1:11434", "concurrency": 4 },
+  "comfy": { "url": "http://127.0.0.1:8188", "concurrency": 1 },
+  "ageStepSeconds": [0, 600, 600],
+  "batchSeconds": 300,
+  "emptyMiB": 1200,
+  "clients": {
+    "chat": { "priority": "interactive", "note": "A web page where someone is waiting for an answer" },
+    "images": { "priority": "interactive", "note": "Image generator page" },
+    "scanner": { "priority": "normal", "note": "Photo processing, minutes are fine" },
+    "embedder": { "priority": "background", "note": "Bulk embedding, runs when nobody else needs the card" }
+  }
+}

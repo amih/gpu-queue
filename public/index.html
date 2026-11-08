@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GPU queue</title>
+<style>
+  :root { --bg:#fbfaf7; --fg:#1d1d1b; --muted:#6b6a65; --line:#e3e1da; --accent:#2f6f5e; --warn:#a4541b; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#17181a; --fg:#e8e6e1; --muted:#9a988f; --line:#2c2d30; --accent:#7cc4ad; --warn:#e39a5f; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+  main { max-width: 1050px; margin: 0 auto; padding: 20px 16px 60px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 16px; margin: 28px 0 8px; }
+  .muted { color: var(--muted); }
+  .row { display:flex; gap:12px; flex-wrap:wrap; align-items:stretch; }
+  .tile { border:1px solid var(--line); border-radius:6px; padding:10px 14px; min-width:150px; flex:1; }
+  .tile b { display:block; font-size:20px; font-variant-numeric: tabular-nums; }
+  .bar { height:8px; background:var(--line); border-radius:4px; overflow:hidden; margin-top:6px; }
+  .bar i { display:block; height:100%; background:var(--accent); }
+  table { width:100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align: top; }
+  th { font-weight:600; font-size:13px; color:var(--muted); }
+  td.num { text-align:right; }
+  button, select { font:inherit; font-size:13px; padding:3px 8px; border:1px solid var(--line); border-radius:4px; background:transparent; color:var(--fg); cursor:pointer; }
+  button.main { border-color: var(--accent); color: var(--accent); }
+  .pill { font-size:12px; padding:1px 7px; border-radius:10px; border:1px solid var(--line); white-space:nowrap; }
+  .p-interactive { border-color: var(--warn); color: var(--warn); }
+  .p-background { color: var(--muted); }
+  .empty { color: var(--muted); padding: 8px 0; }
+  .paused { color: var(--warn); font-weight:600; }
+</style>
+</head>
+<body>
+<main>
+  <h1>GPU queue</h1>
+  <p class="muted" id="sub">Every program that uses the graphics card waits its turn here.</p>
+
+  <div class="row" id="tiles"></div>
+
+  <h2>Running now</h2>
+  <div id="running"></div>
+
+  <h2>Waiting <span class="muted" id="waitnote"></span></h2>
+  <div id="waiting"></div>
+
+  <h2>Programs</h2>
+  <p class="muted">Priority decides who goes first. A job that waits 10 minutes moves up one level, so background work still gets its turn.</p>
+  <div id="clients"></div>
+
+  <h2>Finished</h2>
+  <div id="history"></div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c]));
+const secs = (ms) => {
+  if (ms == null) return '–';
+  const s = Math.round(ms / 1000);
+  if (s < 60) return s + ' s';
+  if (s < 3600) return Math.floor(s / 60) + ' min ' + (s % 60) + ' s';
+  return Math.floor(s / 3600) + ' h ' + Math.floor((s % 3600) / 60) + ' min';
+};
+const clock = (t) => t ? new Date(t).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' }) : '';
+const pill = (p) => `<span class="pill p-${p}">${p}</span>`;
+let priorities = [];
+
+async function post(path, body) {
+  await fetch(path, { method:'POST', headers:{ 'content-type':'application/json' }, body: JSON.stringify(body || {}) });
+  refresh();
+}
+
+function table(rows, head, emptyText) {
+  if (!rows.length) return `<div class="empty">${emptyText}</div>`;
+  return `<table><thead><tr>${head.map((h) => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table>`;
+}
+
+function render(d) {
+  priorities = d.priorities;
+  const g = d.gpu;
+  const memPct = g ? Math.round(100 * g.usedMiB / g.totalMiB) : 0;
+  $('tiles').innerHTML = `
+    <div class="tile"><span class="muted">${esc(g?.name || 'No GPU found')}</span>
+      <b>${g ? (g.usedMiB / 1024).toFixed(1) + ' / ' + (g.totalMiB / 1024).toFixed(1) + ' GB' : '–'}</b>
+      <div class="bar"><i style="width:${memPct}%"></i></div></div>
+    <div class="tile"><span class="muted">Busy</span><b>${g ? g.util + '%' : '–'}</b><span class="muted">${g ? g.tempC + ' °C' : ''}</span></div>
+    <div class="tile"><span class="muted">On the card</span><b style="font-size:15px">${esc(d.resident?.group || 'nothing yet')}</b>
+      <span class="muted">${d.switching ? 'switching…' : d.resident ? 'since ' + clock(d.resident.since) : ''}</span></div>
+    <div class="tile"><span class="muted">Queue</span>
+      <b class="${d.paused ? 'paused' : ''}">${d.paused ? 'Paused' : 'Running'}</b>
+      <button class="main" onclick="post('/api/pause',{on:${!d.paused}})">${d.paused ? 'Resume' : 'Pause'}</button></div>`;
+  $('sub').textContent = d.lastSwitch
+    ? `Last switch: ${d.lastSwitch.from || '(start)'} → ${d.lastSwitch.to} at ${clock(d.lastSwitch.at)}, card emptied in ${secs(d.lastSwitch.ms)}.`
+    : 'Every program that uses the graphics card waits its turn here.';
+
+  const procs = (g?.procs || []).map((p) => `${esc(p.name)} ${(p.memMiB / 1024).toFixed(1)} GB`).join(' · ');
+  $('running').innerHTML = table(d.running.map((j) => `<tr><td>${esc(j.client)}</td><td>${esc(j.label)}</td>
+      <td>${pill(j.priority)}</td><td>started ${clock(j.startedAt)}</td><td class="num">${secs(d.now - j.startedAt)}</td></tr>`),
+    ['Program', 'Work', 'Priority', '', 'For'], 'Nothing running.') + (procs ? `<p class="muted">Using the card: ${procs}</p>` : '');
+
+  $('waitnote').textContent = d.waiting.length ? `(${d.waiting.length}, in the order they will run)` : '';
+  $('waiting').innerHTML = table(d.waiting.map((j) => `<tr><td>${esc(j.client)}</td><td>${esc(j.label)}</td>
+      <td>${pill(j.effective)}${j.effective !== j.priority ? ` <span class="muted">(was ${j.priority})</span>` : ''}</td>
+      <td class="num">${secs(d.now - j.queuedAt)}</td>
+      <td><select onchange="post('/api/jobs/${j.id}/priority',{priority:this.value})">${priorities.map((p) =>
+        `<option ${p === j.priority ? 'selected' : ''}>${p}</option>`).join('')}</select>
+      <button onclick="post('/api/jobs/${j.id}/cancel')">Cancel</button></td></tr>`),
+    ['Program', 'Work', 'Priority', 'Waiting', ''], 'Nobody is waiting.');
+
+  $('clients').innerHTML = table(d.clients.map((c) => `<tr><td><b>${esc(c.name)}</b><br><span class="muted">${esc(c.note)}</span></td>
+      <td><select onchange="post('/api/clients/${c.name}/priority',{priority:this.value})">${priorities.map((p) =>
+        `<option ${p === c.priority ? 'selected' : ''}>${p}</option>`).join('')}</select></td>
+      <td class="num">${c.running}</td><td class="num">${c.waiting}</td><td class="num">${c.recent}</td>
+      <td class="num">${c.medianWait == null ? '–' : c.medianWait.toFixed(1) + ' s'}</td>
+      <td class="num">${c.p95Wait == null ? '–' : c.p95Wait.toFixed(1) + ' s'}</td></tr>`),
+    ['Program', 'Priority', 'Running', 'Waiting', 'Recent jobs', 'Typical wait', 'Slow wait (1 in 20)'], 'No programs yet.');
+
+  $('history').innerHTML = table(d.history.slice(0, 40).map((j) => `<tr><td>${clock(j.endedAt)}</td><td>${esc(j.client)}</td>
+      <td>${esc(j.label)}</td><td>${esc(j.state)}${j.note ? ` <span class="muted">${esc(j.note)}</span>` : ''}</td>
+      <td class="num">${j.startedAt ? secs(j.startedAt - j.queuedAt) : '–'}</td>
+      <td class="num">${j.startedAt ? secs(j.endedAt - j.startedAt) : '–'}</td></tr>`),
+    ['Ended', 'Program', 'Work', 'Result', 'Waited', 'Ran'], 'Nothing yet.');
+}
+
+async function refresh() {
+  try { render(await (await fetch('/api/status', { cache: 'no-store' })).json()); }
+  catch { $('sub').textContent = 'Cannot reach the queue.'; }
+}
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>
