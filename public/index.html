@@ -21,7 +21,8 @@
   table { width:100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
   th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align: top; }
   th { font-weight:600; font-size:13px; color:var(--muted); }
-  td.num { text-align:right; }
+  td.num { text-align:right; white-space:nowrap; }
+  td.when { white-space:nowrap; }
   button, select { font:inherit; font-size:13px; padding:3px 8px; border:1px solid var(--line); border-radius:4px; background:transparent; color:var(--fg); cursor:pointer; }
   button.main { border-color: var(--accent); color: var(--accent); }
   .pill { font-size:12px; padding:1px 7px; border-radius:10px; border:1px solid var(--line); white-space:nowrap; }
@@ -29,6 +30,17 @@
   .p-background { color: var(--muted); }
   .empty { color: var(--muted); padding: 8px 0; }
   .paused { color: var(--warn); font-weight:600; }
+  .st { display:inline-block; min-width:78px; text-align:center; font-size:12px; font-weight:600; padding:2px 8px; border-radius:10px; white-space:nowrap; }
+  .st-running { background:#2f8f5b; color:#fff; }
+  .st-waiting { background:#e8a33d; color:#1d1d1b; }
+  .st-done { background:var(--line); color:var(--muted); }
+  .st-failed { background:#c8443a; color:#fff; }
+  .st-cancelled { background:transparent; color:var(--muted); border:1px dashed var(--muted); }
+  tr.r-running td { background: rgba(47,143,91,.10); }
+  tr.r-waiting td { background: rgba(232,163,61,.10); }
+  tr.r-done td, tr.r-cancelled td { color: var(--muted); }
+  tr.r-failed td { background: rgba(200,68,58,.08); }
+  .legend { display:flex; gap:10px; flex-wrap:wrap; margin:0 0 8px; }
 </style>
 </head>
 <body>
@@ -38,18 +50,13 @@
 
   <div class="row" id="tiles"></div>
 
-  <h2>Running now</h2>
-  <div id="running"></div>
-
-  <h2>Waiting <span class="muted" id="waitnote"></span></h2>
-  <div id="waiting"></div>
+  <h2>Jobs <span class="muted" id="jobnote"></span></h2>
+  <div id="jobs"></div>
+  <p class="muted" id="procs"></p>
 
   <h2>Programs</h2>
   <p class="muted">Priority decides who goes first. A job that waits 10 minutes moves up one level, so background work still gets its turn.</p>
   <div id="clients"></div>
-
-  <h2>Finished</h2>
-  <div id="history"></div>
 </main>
 <script>
 const $ = (id) => document.getElementById(id);
@@ -94,18 +101,30 @@ function render(d) {
     : 'Every program that uses the graphics card waits its turn here.';
 
   const procs = (g?.procs || []).map((p) => `${esc(p.name)} ${(p.memMiB / 1024).toFixed(1)} GB`).join(' · ');
-  $('running').innerHTML = table(d.running.map((j) => `<tr><td>${esc(j.client)}</td><td>${esc(j.label)}</td>
-      <td>${pill(j.priority)}</td><td>started ${clock(j.startedAt)}</td><td class="num">${secs(d.now - j.startedAt)}</td></tr>`),
-    ['Program', 'Work', 'Priority', '', 'For'], 'Nothing running.') + (procs ? `<p class="muted">Using the card: ${procs}</p>` : '');
+  $('procs').textContent = procs ? `Using the card now: ${procs}` : '';
 
-  $('waitnote').textContent = d.waiting.length ? `(${d.waiting.length}, in the order they will run)` : '';
-  $('waiting').innerHTML = table(d.waiting.map((j) => `<tr><td>${esc(j.client)}</td><td>${esc(j.label)}</td>
-      <td>${pill(j.effective)}${j.effective !== j.priority ? ` <span class="muted">(was ${j.priority})</span>` : ''}</td>
-      <td class="num">${secs(d.now - j.queuedAt)}</td>
-      <td><select onchange="post('/api/jobs/${j.id}/priority',{priority:this.value})">${priorities.map((p) =>
-        `<option ${p === j.priority ? 'selected' : ''}>${p}</option>`).join('')}</select>
-      <button onclick="post('/api/jobs/${j.id}/cancel')">Cancel</button></td></tr>`),
-    ['Program', 'Work', 'Priority', 'Waiting', ''], 'Nobody is waiting.');
+  // One list: running, then waiting in the order they will run, then finished (newest first).
+  const STATUS = { running: 'Running', waiting: 'Waiting', done: 'Done', failed: 'Failed', cancelled: 'Cancelled' };
+  const rows = [
+    ...d.running.map((j) => ({ ...j, st: 'running' })),
+    ...d.waiting.map((j, i) => ({ ...j, st: 'waiting', place: i + 1 })),
+    ...d.history.slice(0, 60).map((j) => ({ ...j, st: STATUS[j.state] ? j.state : 'done' })),
+  ];
+  const prio = (j) => j.st === 'waiting' && j.effective !== j.priority
+    ? `${pill(j.effective)} <span class="muted">(was ${j.priority})</span>` : pill(j.priority);
+  const waited = (j) => secs((j.startedAt ?? (j.st === 'waiting' ? d.now : j.endedAt)) - j.queuedAt);
+  const ran = (j) => j.st === 'running' ? secs(d.now - j.startedAt) : j.startedAt && j.endedAt ? secs(j.endedAt - j.startedAt) : '–';
+  const when = (j) => j.st === 'running' ? `started ${clock(j.startedAt)}` : j.st === 'waiting' ? `${j.place === 1 ? 'next' : '#' + j.place} · since ${clock(j.queuedAt)}` : clock(j.endedAt);
+  const actions = (j) => j.st !== 'waiting' ? (j.note ? `<span class="muted">${esc(j.note)}</span>` : '') :
+    `<select onchange="post('/api/jobs/${j.id}/priority',{priority:this.value})">${priorities.map((p) =>
+      `<option ${p === j.priority ? 'selected' : ''}>${p}</option>`).join('')}</select>
+     <button onclick="post('/api/jobs/${j.id}/cancel')">Cancel</button>`;
+  $('jobnote').textContent = `(${d.running.length} running, ${d.waiting.length} waiting)`;
+  $('jobs').innerHTML = table(rows.map((j) => `<tr class="r-${j.st}">
+      <td><span class="st st-${j.st}">${STATUS[j.st]}</span></td>
+      <td>${esc(j.client)}</td><td>${esc(j.label)}</td><td>${prio(j)}</td>
+      <td class="when">${when(j)}</td><td class="num">${waited(j)}</td><td class="num">${ran(j)}</td><td>${actions(j)}</td></tr>`),
+    ['Status', 'Program', 'Work', 'Priority', 'When', 'Waited', 'Ran', ''], 'No jobs yet.');
 
   $('clients').innerHTML = table(d.clients.map((c) => `<tr><td><b>${esc(c.name)}</b><br><span class="muted">${esc(c.note)}</span></td>
       <td><select onchange="post('/api/clients/${c.name}/priority',{priority:this.value})">${priorities.map((p) =>
@@ -115,14 +134,11 @@ function render(d) {
       <td class="num">${c.p95Wait == null ? '–' : c.p95Wait.toFixed(1) + ' s'}</td></tr>`),
     ['Program', 'Priority', 'Running', 'Waiting', 'Recent jobs', 'Typical wait', 'Slow wait (1 in 20)'], 'No programs yet.');
 
-  $('history').innerHTML = table(d.history.slice(0, 40).map((j) => `<tr><td>${clock(j.endedAt)}</td><td>${esc(j.client)}</td>
-      <td>${esc(j.label)}</td><td>${esc(j.state)}${j.note ? ` <span class="muted">${esc(j.note)}</span>` : ''}</td>
-      <td class="num">${j.startedAt ? secs(j.startedAt - j.queuedAt) : '–'}</td>
-      <td class="num">${j.startedAt ? secs(j.endedAt - j.startedAt) : '–'}</td></tr>`),
-    ['Ended', 'Program', 'Work', 'Result', 'Waited', 'Ran'], 'Nothing yet.');
 }
 
 async function refresh() {
+  // Don't redraw under an open menu.
+  if (document.activeElement?.tagName === 'SELECT') return;
   try { render(await (await fetch('/api/status', { cache: 'no-store' })).json()); }
   catch { $('sub').textContent = 'Cannot reach the queue.'; }
 }
