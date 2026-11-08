@@ -61,7 +61,7 @@ const secs = (ms) => {
   if (s < 3600) return Math.floor(s / 60) + ' min ' + (s % 60) + ' s';
   return Math.floor(s / 3600) + ' h ' + Math.floor((s % 3600) / 60) + ' min';
 };
-const clock = (t) => t ? new Date(t).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' }) : '';
+const clock = (t) => t ? new Date(t).toLocaleTimeString('en-GB', { hour:'2-digit', minute:'2-digit', second:'2-digit', hourCycle:'h23' }) : '';
 const pill = (p) => `<span class="pill p-${p}">${p}</span>`;
 let priorities = [];
 
