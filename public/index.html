@@ -103,11 +103,12 @@ function render(d) {
   const procs = (g?.procs || []).map((p) => `${esc(p.name)} ${(p.memMiB / 1024).toFixed(1)} GB`).join(' · ');
   $('procs').textContent = procs ? `Using the card now: ${procs}` : '';
 
-  // One list: running, then waiting in the order they will run, then finished (newest first).
+  // One timeline, future at the top: waiting (the next job just above the running ones),
+  // then running, then finished (newest first).
   const STATUS = { running: 'Running', waiting: 'Waiting', done: 'Done', failed: 'Failed', cancelled: 'Cancelled' };
   const rows = [
+    ...d.waiting.map((j, i) => ({ ...j, st: 'waiting', place: i + 1 })).reverse(),
     ...d.running.map((j) => ({ ...j, st: 'running' })),
-    ...d.waiting.map((j, i) => ({ ...j, st: 'waiting', place: i + 1 })),
     ...d.history.slice(0, 60).map((j) => ({ ...j, st: STATUS[j.state] ? j.state : 'done' })),
   ];
   const prio = (j) => j.st === 'waiting' && j.effective !== j.priority
