@@ -30,7 +30,7 @@ function usage(code) {
 }
 
 const base = new URL(process.env.GPU_QUEUE_URL || 'http://127.0.0.1:3890');
-const q = new URLSearchParams({ client: opts.client || basename(args[0]), label: opts.label || args.map(basename).join(' ').slice(0, 120) });
+const q = new URLSearchParams({ client: opts.client || basename(args[0]), label: opts.label || args.map((a) => basename(a)).join(' ').slice(0, 120) });
 if (opts.priority) q.set('priority', opts.priority);
 
 let child = null;

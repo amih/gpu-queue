@@ -121,6 +121,23 @@ test('a lease waits for running work and holds the card until released', async (
   assert.ok(events.includes('ollama end chat after'));
 });
 
+test('gpu-lease runs the command once granted and passes its exit code', async () => {
+  const run = (cmd) => new Promise((resolve) => {
+    const p = spawn(process.execPath, [join(root, 'bin/gpu-lease'), '-c', 'cli', '--', ...cmd],
+      { env: { ...process.env, GPU_QUEUE_URL: `http://127.0.0.1:${PROXY}` } });
+    let out = '';
+    p.stdout.on('data', (d) => { out += d; });
+    p.on('exit', (code) => resolve({ code, out }));
+  });
+  const ok = await run(['/bin/echo', 'hello']);
+  assert.equal(ok.code, 0);
+  assert.equal(ok.out.trim(), 'hello');
+  assert.equal((await run(['/bin/sh', '-c', 'exit 3'])).code, 3);
+  await sleep(100);
+  const s = await fetch(`http://127.0.0.1:${STATUS}/api/status`).then((r) => r.json());
+  assert.equal(s.running.length, 0, 'lease released');
+});
+
 test('status page reports and changes priorities', async () => {
   const s = await fetch(`http://127.0.0.1:${STATUS}/api/status`).then((r) => r.json());
   assert.ok(s.history.length >= 5);
