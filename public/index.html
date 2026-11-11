@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>GPU queue</title>
 <style>
-  :root { --bg:#fbfaf7; --fg:#1d1d1b; --muted:#6b6a65; --line:#e3e1da; --accent:#2f6f5e; --warn:#a4541b; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#17181a; --fg:#e8e6e1; --muted:#9a988f; --line:#2c2d30; --accent:#7cc4ad; --warn:#e39a5f; } }
+  :root { --series:#2a78d6; --bg:#fbfaf7; --fg:#1d1d1b; --muted:#6b6a65; --line:#e3e1da; --accent:#2f6f5e; --warn:#a4541b; }
+  @media (prefers-color-scheme: dark) { :root { --series:#3987e5; --bg:#17181a; --fg:#e8e6e1; --muted:#9a988f; --line:#2c2d30; --accent:#7cc4ad; --warn:#e39a5f; } }
   * { box-sizing: border-box; }
   body { margin:0; font:15px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
   main { max-width: 1050px; margin: 0 auto; padding: 20px 16px 60px; }
@@ -41,6 +41,34 @@
   tr.r-done td, tr.r-cancelled td { color: var(--muted); }
   tr.r-failed td { background: rgba(200,68,58,.08); }
   .legend { display:flex; gap:10px; flex-wrap:wrap; margin:0 0 8px; }
+  .grp td { cursor:pointer; }
+  .grp .count { font-weight:700; margin-left:4px; }
+  tr.member td { font-size:13px; padding-top:3px; padding-bottom:3px; }
+  tr.member td:first-child { padding-left:28px; }
+  .more { margin-top:8px; }
+  .ranges { display:flex; gap:4px; flex-wrap:wrap; margin:0 0 12px; }
+  .ranges button[aria-pressed="true"] { border-color:var(--accent); color:var(--accent); font-weight:600; }
+  #stats.loading { opacity:.55; transition:opacity .2s; }
+  .charts { display:grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap:12px; margin-top:12px; }
+  .chart { border:1px solid var(--line); border-radius:6px; padding:8px 10px 6px; position:relative; }
+  .chart .head { display:flex; justify-content:space-between; gap:8px; font-size:13px; }
+  .chart .head b { font-variant-numeric: tabular-nums; }
+  .chart .plot { position:relative; height:104px; margin-top:4px; }
+  .chart svg { position:absolute; inset:14px 0 0 0; width:100%; height:calc(100% - 14px); overflow:visible; }
+  .chart .ymax { position:absolute; top:0; left:2px; font-size:11px; color:var(--muted); pointer-events:none; }
+  .xaxis { display:flex; justify-content:space-between; font-size:11px; color:var(--muted); margin-top:2px; }
+  .grid line { stroke:var(--line); stroke-width:1; vector-effect:non-scaling-stroke; }
+  .line { fill:none; stroke:var(--series); stroke-width:2; vector-effect:non-scaling-stroke; stroke-linejoin:round; }
+  .area { fill:var(--series); opacity:.12; }
+  .cross { stroke:var(--muted); stroke-width:1; vector-effect:non-scaling-stroke; stroke-dasharray:3 3; display:none; }
+  .lanes { border:1px solid var(--line); border-radius:6px; padding:8px 10px; }
+  .lane { display:grid; grid-template-columns: 110px 1fr; align-items:center; gap:8px; font-size:13px; }
+  .lane + .lane { margin-top:3px; }
+  .lane .track { position:relative; height:16px; background:color-mix(in srgb, var(--line) 45%, transparent); border-radius:3px; }
+  .lane .name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .tip { position:fixed; pointer-events:none; background:var(--bg); border:1px solid var(--line); border-radius:4px; padding:4px 8px; font-size:12px; display:none; z-index:5; box-shadow:0 2px 8px rgba(0,0,0,.12); }
+  .tip b { font-size:14px; }
+  .key { display:inline-block; width:14px; height:3px; border-radius:2px; vertical-align:middle; margin-right:5px; }
 </style>
 </head>
 <body>
@@ -51,26 +79,44 @@
   <div class="row" id="tiles"></div>
 
   <h2>Jobs <span class="muted" id="jobnote"></span></h2>
-  <div id="jobs"></div>
   <p class="muted" id="procs"></p>
+  <div id="jobs"></div>
+  <button class="more" id="more" onclick="moreLines()">Show older</button>
+
+  <h2>Statistics</h2>
+  <div class="ranges" id="ranges"></div>
+  <div id="stats">
+    <div class="row" id="stiles"></div>
+    <h2 style="font-size:14px">Who had the card</h2>
+    <div class="lanes" id="lanes"></div>
+    <div id="sclients" style="margin-top:12px"></div>
+    <h2 style="font-size:14px">The machine</h2>
+    <div class="charts" id="charts"></div>
+  </div>
 
   <h2>Programs</h2>
   <p class="muted">Priority decides who goes first. A job that waits 10 minutes moves up one level, so background work still gets its turn.</p>
   <div id="clients"></div>
+  <div class="tip" id="tip"></div>
 </main>
 <script>
 const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c]));
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
 const secs = (ms) => {
   if (ms == null) return '–';
   const s = Math.round(ms / 1000);
   if (s < 60) return s + ' s';
   if (s < 3600) return Math.floor(s / 60) + ' min ' + (s % 60) + ' s';
-  return Math.floor(s / 3600) + ' h ' + Math.floor((s % 3600) / 60) + ' min';
+  if (s < 86400) return Math.floor(s / 3600) + ' h ' + Math.floor((s % 3600) / 60) + ' min';
+  return Math.floor(s / 86400) + ' d ' + Math.floor((s % 86400) / 3600) + ' h';
 };
 const clock = (t) => t ? new Date(t).toLocaleTimeString('en-GB', { hour:'2-digit', minute:'2-digit', second:'2-digit', hourCycle:'h23' }) : '';
+const hm = (t) => new Date(t).toLocaleTimeString('en-GB', { hour:'2-digit', minute:'2-digit', hourCycle:'h23' });
+const sameDay = (a, b) => new Date(a).toDateString() === new Date(b).toDateString();
+const dayHm = (t) => sameDay(t, Date.now()) ? hm(t) : new Date(t).toLocaleDateString('en-GB', { day:'numeric', month:'short' }) + ' ' + hm(t);
 const pill = (p) => `<span class="pill p-${p}">${p}</span>`;
 let priorities = [];
+let allClients = [];
 
 async function post(path, body) {
   await fetch(path, { method:'POST', headers:{ 'content-type':'application/json' }, body: JSON.stringify(body || {}) });
@@ -82,15 +128,84 @@ function table(rows, head, emptyText) {
   return `<table><thead><tr>${head.map((h) => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table>`;
 }
 
+// ---------- jobs ----------
+const STATUS = { running: 'Running', waiting: 'Waiting', done: 'Done', failed: 'Failed', cancelled: 'Cancelled' };
+let lines = 30;
+const open = new Map();   // folded line key -> { count, jobs }
+let last = null;
+
+function moreLines() { lines += 30; refresh(); }
+
+// A folded line keeps its key while new jobs join it at the top.
+const keyOf = (g) => g.id.split('..')[0];
+
+async function toggle(key) {
+  if (open.has(key)) open.delete(key);
+  else open.set(key, { count: 0, jobs: null });
+  if (last) render(last);
+  loadOpen();
+}
+
+async function loadOpen() {
+  if (!last) return;
+  for (const g of last.timeline.lines.filter((l) => l.folded)) {
+    const o = open.get(keyOf(g));
+    if (!o || o.count === g.count) continue;
+    o.count = g.count;
+    const jobs = await (await fetch(`/api/jobs?from=${g.firstEndedAt}&to=${g.endedAt}`, { cache:'no-store' })).json();
+    o.jobs = jobs.filter((j) => j.client === g.client);
+    render(last);
+  }
+}
+
+function jobRow(j, d, cls = '') {
+  const st = j.st;
+  const prio = st === 'waiting' && j.effective !== j.priority
+    ? `${pill(j.effective)} <span class="muted">(was ${j.priority})</span>` : pill(j.priority);
+  const waited = secs((j.startedAt ?? (st === 'waiting' ? d.now : j.endedAt)) - j.queuedAt);
+  const ran = st === 'running' ? secs(d.now - j.startedAt) : j.startedAt && j.endedAt ? secs(j.endedAt - j.startedAt) : '–';
+  const when = st === 'running' ? `started ${clock(j.startedAt)}` : st === 'waiting' ? `${j.place === 1 ? 'next' : '#' + j.place} · since ${clock(j.queuedAt)}` : (sameDay(j.endedAt, d.now) ? '' : dayHm(j.endedAt).split(' ').slice(0, 2).join(' ') + ' ') + clock(j.endedAt);
+  const actions = st !== 'waiting' ? (j.note ? `<span class="muted">${esc(j.note)}</span>` : '') :
+    `<select onchange="post('/api/jobs/${esc(j.id)}/priority',{priority:this.value})">${priorities.map((p) =>
+      `<option ${p === j.priority ? 'selected' : ''}>${p}</option>`).join('')}</select>
+     <button onclick="post('/api/jobs/${esc(j.id)}/cancel')">Cancel</button>`;
+  return `<tr class="r-${st} ${cls}">
+    <td><span class="st st-${st}">${STATUS[st]}</span></td>
+    <td>${esc(j.client)}</td><td>${esc(j.label)}</td><td>${prio}</td>
+    <td class="when">${when}</td><td class="num">${waited}</td><td class="num">${ran}</td><td>${actions}</td></tr>`;
+}
+
+function groupRow(g, d) {
+  const st = STATUS[g.state] ? g.state : 'done';
+  const key = keyOf(g);
+  const isOpen = open.has(key);
+  const span = sameDay(g.firstEndedAt, g.endedAt) ? `${dayHm(g.firstEndedAt)}–${hm(g.endedAt)}` : `${dayHm(g.firstEndedAt)} – ${dayHm(g.endedAt)}`;
+  let html = `<tr class="r-${st} grp" onclick="toggle('${esc(key)}')" title="${isOpen ? 'Fold' : 'Show each job'}">
+    <td><span class="st st-${st}">${STATUS[st]}<span class="count">×${g.count}</span></span>${g.failed ? ` <span class="st st-failed" style="min-width:0">${g.failed} failed</span>` : ''}${g.cancelled ? ` <span class="st st-cancelled" style="min-width:0">${g.cancelled} cancelled</span>` : ''}</td>
+    <td>${esc(g.client)}</td><td>${isOpen ? '▾' : '▸'} ${esc(g.label)}</td><td>${pill(g.priority)}</td>
+    <td class="when">${span}</td>
+    <td class="num">${g.medianWait == null ? '–' : '≈' + secs(g.medianWait)}${g.maxWait > 2 * (g.medianWait || 0) && g.maxWait > 5000 ? ` <span class="muted">(max ${secs(g.maxWait)})</span>` : ''}</td>
+    <td class="num">${g.totalRan ? secs(g.totalRan) : '–'}</td>
+    <td class="muted">${g.medianRan ? `≈${secs(g.medianRan)} each` : ''}</td></tr>`;
+  const o = open.get(key);
+  if (isOpen) {
+    html += o?.jobs ? o.jobs.map((j) => jobRow({ ...j, st: STATUS[j.state] ? j.state : 'done' }, d, 'member')).join('')
+      : `<tr class="member"><td colspan="8" class="muted">Loading…</td></tr>`;
+  }
+  return html;
+}
+
 function render(d) {
+  last = d;
   priorities = d.priorities;
+  allClients = d.clients.map((c) => c.name);
   const g = d.gpu;
   const memPct = g ? Math.round(100 * g.usedMiB / g.totalMiB) : 0;
   $('tiles').innerHTML = `
     <div class="tile"><span class="muted">${esc(g?.name || 'No GPU found')}</span>
       <b>${g ? (g.usedMiB / 1024).toFixed(1) + ' / ' + (g.totalMiB / 1024).toFixed(1) + ' GB' : '–'}</b>
       <div class="bar"><i style="width:${memPct}%"></i></div></div>
-    <div class="tile"><span class="muted">Busy</span><b>${g ? g.util + '%' : '–'}</b><span class="muted">${g ? g.tempC + ' °C' : ''}</span></div>
+    <div class="tile"><span class="muted">Busy</span><b>${g ? g.util + '%' : '–'}</b><span class="muted">${g ? g.tempC + ' °C' + (g.powerW ? ' · ' + Math.round(g.powerW) + ' W' : '') : ''}</span></div>
     <div class="tile"><span class="muted">On the card</span><b style="font-size:15px">${esc(d.resident?.group || 'nothing yet')}</b>
       <span class="muted">${d.switching ? 'switching…' : d.resident ? 'since ' + clock(d.resident.since) : ''}</span></div>
     <div class="tile"><span class="muted">Queue</span>
@@ -104,46 +219,180 @@ function render(d) {
   $('procs').textContent = procs ? `Using the card now: ${procs}` : '';
 
   // One timeline, future at the top: waiting (the next job just above the running ones),
-  // then running, then finished (newest first).
-  const STATUS = { running: 'Running', waiting: 'Waiting', done: 'Done', failed: 'Failed', cancelled: 'Cancelled' };
+  // then running, then finished (newest first) with runs of alike jobs folded.
   const rows = [
-    ...d.waiting.map((j, i) => ({ ...j, st: 'waiting', place: i + 1 })).reverse(),
-    ...d.running.map((j) => ({ ...j, st: 'running' })),
-    ...d.history.slice(0, 60).map((j) => ({ ...j, st: STATUS[j.state] ? j.state : 'done' })),
+    ...d.waiting.map((j, i) => ({ ...j, st: 'waiting', place: i + 1 })).reverse().map((j) => jobRow(j, d)),
+    ...d.running.map((j) => jobRow({ ...j, st: 'running' }, d)),
+    ...d.timeline.lines.map((l) => l.folded ? groupRow(l, d) : jobRow({ ...l, st: STATUS[l.state] ? l.state : 'done' }, d)),
   ];
-  const prio = (j) => j.st === 'waiting' && j.effective !== j.priority
-    ? `${pill(j.effective)} <span class="muted">(was ${j.priority})</span>` : pill(j.priority);
-  const waited = (j) => secs((j.startedAt ?? (j.st === 'waiting' ? d.now : j.endedAt)) - j.queuedAt);
-  const ran = (j) => j.st === 'running' ? secs(d.now - j.startedAt) : j.startedAt && j.endedAt ? secs(j.endedAt - j.startedAt) : '–';
-  const when = (j) => j.st === 'running' ? `started ${clock(j.startedAt)}` : j.st === 'waiting' ? `${j.place === 1 ? 'next' : '#' + j.place} · since ${clock(j.queuedAt)}` : clock(j.endedAt);
-  const actions = (j) => j.st !== 'waiting' ? (j.note ? `<span class="muted">${esc(j.note)}</span>` : '') :
-    `<select onchange="post('/api/jobs/${j.id}/priority',{priority:this.value})">${priorities.map((p) =>
-      `<option ${p === j.priority ? 'selected' : ''}>${p}</option>`).join('')}</select>
-     <button onclick="post('/api/jobs/${j.id}/cancel')">Cancel</button>`;
-  $('jobnote').textContent = `(${d.running.length} running, ${d.waiting.length} waiting)`;
-  $('jobs').innerHTML = table(rows.map((j) => `<tr class="r-${j.st}">
-      <td><span class="st st-${j.st}">${STATUS[j.st]}</span></td>
-      <td>${esc(j.client)}</td><td>${esc(j.label)}</td><td>${prio(j)}</td>
-      <td class="when">${when(j)}</td><td class="num">${waited(j)}</td><td class="num">${ran(j)}</td><td>${actions(j)}</td></tr>`),
-    ['Status', 'Program', 'Work', 'Priority', 'When', 'Waited', 'Ran', ''], 'No jobs yet.');
+  $('jobnote').textContent = `(${d.running.length} running, ${d.waiting.length} waiting · runs of 3 or more alike jobs are folded; click one to open it)`;
+  $('jobs').innerHTML = table(rows, ['Status', 'Program', 'Work', 'Priority', 'When', 'Waited', 'Ran', ''], 'No jobs yet.');
+  $('more').style.display = d.timeline.more ? '' : 'none';
 
   $('clients').innerHTML = table(d.clients.map((c) => `<tr><td><b>${esc(c.name)}</b><br><span class="muted">${esc(c.note)}</span></td>
-      <td><select onchange="post('/api/clients/${c.name}/priority',{priority:this.value})">${priorities.map((p) =>
+      <td><select onchange="post('/api/clients/${esc(c.name)}/priority',{priority:this.value})">${priorities.map((p) =>
         `<option ${p === c.priority ? 'selected' : ''}>${p}</option>`).join('')}</select></td>
-      <td class="num">${c.running}</td><td class="num">${c.waiting}</td><td class="num">${c.recent}</td>
-      <td class="num">${c.medianWait == null ? '–' : c.medianWait.toFixed(1) + ' s'}</td>
-      <td class="num">${c.p95Wait == null ? '–' : c.p95Wait.toFixed(1) + ' s'}</td></tr>`),
-    ['Program', 'Priority', 'Running', 'Waiting', 'Recent jobs', 'Typical wait', 'Slow wait (1 in 20)'], 'No programs yet.');
-
+      <td class="num">${c.running}</td><td class="num">${c.waiting}</td></tr>`),
+    ['Program', 'Priority', 'Running', 'Waiting'], 'No programs yet.');
 }
 
 async function refresh() {
   // Don't redraw under an open menu.
   if (document.activeElement?.tagName === 'SELECT') return;
-  try { render(await (await fetch('/api/status', { cache: 'no-store' })).json()); }
+  try { render(await (await fetch(`/api/status?lines=${lines}`, { cache: 'no-store' })).json()); loadOpen(); }
   catch { $('sub').textContent = 'Cannot reach the queue.'; }
 }
-refresh();
+
+// ---------- statistics ----------
+const RANGES = [['1h', 'Last hour'], ['6h', '6 hours'], ['24h', '24 hours'], ['7d', '7 days'], ['30d', '30 days']];
+let range = localStorage.getItem('gpuq-range') || '24h';
+if (!RANGES.some(([k]) => k === range)) range = '24h';
+// Fixed order, colour follows the program (sorted by name), never its rank.
+const dark = matchMedia('(prefers-color-scheme: dark)');
+const PALETTE = () => dark.matches
+  ? ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300', '#9085e9', '#e66767']
+  : ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#6250d6', '#e34948'];
+const colourOf = (name) => { const i = allClients.indexOf(name); return i >= 0 && i < 8 ? PALETTE()[i] : '#8a8984'; };
+
+const CHARTS = [
+  { f: 'gpu', title: 'Graphics card busy', unit: '%', max: () => 100, d: 0 },
+  { f: 'vram', title: 'Graphics card memory', unit: 'GB', max: (i) => i.vramGB, d: 1 },
+  { f: 'temp', title: 'Graphics card heat', unit: '°C', max: () => 100, d: 0 },
+  { f: 'power', title: 'Graphics card power', unit: 'W', max: null, d: 0 },
+  { f: 'cpu', title: 'Processor busy', unit: '%', max: () => 100, d: 0, sub: (i) => `${i.cpus} threads` },
+  { f: 'ram', title: 'Memory in use', unit: 'GB', max: (i) => i.ramGB, d: 0 },
+  { f: 'load', title: 'Load (programs ready to run)', unit: '', max: null, d: 1 },
+  { f: 'wait', title: 'Jobs waiting for the card', unit: '', max: null, d: 1 },
+];
+let stat = null;
+
+$('ranges').innerHTML = RANGES.map(([k, label]) => `<button data-r="${k}" aria-pressed="${k === range}">${label}</button>`).join('');
+$('ranges').onclick = (e) => {
+  const k = e.target.dataset?.r;
+  if (!k) return;
+  range = k;
+  localStorage.setItem('gpuq-range', k);
+  for (const b of $('ranges').children) b.setAttribute('aria-pressed', b.dataset.r === k);
+  loadStats();
+};
+
+const fmt = (v, d, unit) => v == null ? '–' : v.toFixed(d) + (unit ? (unit === '%' || unit === '°C' ? '' : ' ') + unit : '');
+const pct = (x) => (100 * x).toFixed(x < 0.1 ? 1 : 0) + '%';
+
+function renderStats(s) {
+  stat = s;
+  const t = s.totals;
+  const spanMs = s.to - s.from;
+  $('stiles').innerHTML = `
+    <div class="tile"><span class="muted">Card in use</span><b>${pct(t.heldShare)}</b><span class="muted">${secs(t.heldSeconds * 1000)} of ${secs(spanMs)}</span></div>
+    <div class="tile"><span class="muted">Jobs finished</span><b>${t.jobs.toLocaleString('en')}</b><span class="muted">${t.failed} failed · ${t.cancelled} cancelled</span></div>
+    <div class="tile"><span class="muted">Model switches</span><b>${t.switches}</b><span class="muted">the card was emptied and reloaded</span></div>
+    <div class="tile"><span class="muted">Typical wait</span><b>${t.medianWait == null ? '–' : secs(t.medianWait * 1000)}</b><span class="muted">1 in 20 waited over ${t.p95Wait == null ? '–' : secs(t.p95Wait * 1000)}</span></div>`;
+
+  // Lanes: when each program held the card.
+  const x = (tt) => (100 * (tt - s.from) / spanMs).toFixed(3);
+  $('lanes').innerHTML = (s.clients.length ? s.clients.map((c) => `<div class="lane"><span class="name"><span class="key" style="background:${colourOf(c.name)}"></span>${esc(c.name)}</span>
+      <div class="track xs">${c.lanes.map(([a, b]) => `<i style="position:absolute;top:2px;bottom:2px;left:${x(a)}%;width:max(2px, ${(100 * (b - a) / spanMs).toFixed(3)}%);background:${colourOf(c.name)};border-radius:2px"></i>`).join('')}</div></div>`).join('')
+    : '<div class="empty">No jobs in this time.</div>') +
+    `<div class="lane"><span></span><div class="xaxis">${ticks(s.from, s.to)}</div></div>`;
+
+  $('sclients').innerHTML = table(s.clients.map((c) => `<tr>
+      <td><span class="key" style="background:${colourOf(c.name)}"></span>${esc(c.name)}</td>
+      <td class="num">${c.jobs.toLocaleString('en')}</td><td class="num">${c.failed || ''}</td><td class="num">${c.cancelled || ''}</td>
+      <td class="num">${secs(c.heldSeconds * 1000)}</td><td class="num">${pct(c.heldShare)}</td>
+      <td class="num">${c.medianWait == null ? '–' : secs(c.medianWait * 1000)}</td><td class="num">${c.p95Wait == null ? '–' : secs(c.p95Wait * 1000)}</td>
+      <td class="num">${c.medianRan == null ? '–' : secs(c.medianRan * 1000)}</td><td class="num">${c.maxRan == null ? '–' : secs(c.maxRan * 1000)}</td></tr>`),
+    ['Program', 'Jobs', 'Failed', 'Cancelled', 'Card time', 'Share', 'Typical wait', 'Slow wait (1 in 20)', 'Typical run', 'Longest run'], '');
+
+  const pts = s.series.points;
+  const info = s.series.info;
+  $('charts').innerHTML = CHARTS.map((c) => {
+    const vals = pts.map((p) => p[c.f]).filter((v) => v != null);
+    const top = Math.max(c.max?.(info) || 0, ...vals, c.unit === '' ? 1 : 0) || 1;
+    const now = [...pts].reverse().find((p) => p[c.f] != null)?.[c.f];
+    const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+    const peak = vals.length ? Math.max(...vals) : null;
+    // Lines break where no data was recorded.
+    const W = 1000, H = 100;
+    const px = (p) => ((p.t - s.from) / spanMs * W).toFixed(1);
+    const py = (v) => (H - v / top * H).toFixed(1);
+    let line = '', area = '', run = [];
+    const flush = () => {
+      if (!run.length) return;
+      line += 'M' + run.map((p) => `${px(p)},${py(p[c.f])}`).join('L');
+      area += `M${px(run[0])},${H}L` + run.map((p) => `${px(p)},${py(p[c.f])}`).join('L') + `L${px(run[run.length - 1])},${H}Z`;
+      run = [];
+    };
+    for (const p of pts) { if (p[c.f] == null) flush(); else run.push(p); }
+    flush();
+    return `<div class="chart" data-f="${c.f}">
+      <div class="head"><span>${c.title}${c.sub ? ` <span class="muted">· ${esc(c.sub(info))}</span>` : ''}</span><b class="val">${fmt(now, c.d, c.unit)}</b></div>
+      <div class="muted" style="font-size:12px">average ${fmt(avg, c.d, c.unit)} · peak ${fmt(peak, c.d, c.unit)}</div>
+      <div class="plot xs"><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+        <g class="grid"><line x1="0" x2="${W}" y1="${H}" y2="${H}"/><line x1="0" x2="${W}" y1="${H / 2}" y2="${H / 2}" stroke-dasharray="2 4"/></g>
+        <path class="area" d="${area}"/><path class="line" d="${line}"/>
+        <line class="cross" x1="0" x2="0" y1="0" y2="${H}"/></svg>
+        <span class="ymax">${fmt(top, c.d, c.unit)}</span></div>
+      <div class="xaxis">${ticks(s.from, s.to)}</div></div>`;
+  }).join('');
+  $('stats').classList.remove('loading');
+}
+
+function ticks(from, to) {
+  const n = 4;
+  return Array.from({ length: n + 1 }, (_, i) => `<span>${dayHm(from + (to - from) * i / n)}</span>`).join('');
+}
+
+// One crosshair across every chart: the time under the pointer, each chart's value there.
+document.addEventListener('pointermove', (e) => {
+  const el = e.target.closest?.('.xs');
+  const tip = $('tip');
+  if (!el || !stat) { tip.style.display = 'none'; document.querySelectorAll('.cross').forEach((l) => { l.style.display = 'none'; }); resetVals(); return; }
+  const r = el.getBoundingClientRect();
+  const frac = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+  const t = stat.from + frac * (stat.to - stat.from);
+  const pts = stat.series.points;
+  let p = pts[0];
+  for (const q of pts) if (Math.abs(q.t - t) < Math.abs(p.t - t)) p = q;
+  const xs = ((p.t - stat.from) / (stat.to - stat.from) * 1000).toFixed(1);
+  document.querySelectorAll('.cross').forEach((l) => { l.style.display = 'block'; l.setAttribute('x1', xs); l.setAttribute('x2', xs); });
+  for (const box of document.querySelectorAll('.chart')) {
+    const c = CHARTS.find((k) => k.f === box.dataset.f);
+    box.querySelector('.val').textContent = fmt(p[c.f], c.d, c.unit);
+  }
+  // Who held the card at that moment.
+  const holders = stat.clients.filter((c) => c.lanes.some(([a, b]) => a <= t && t <= b)).map((c) => c.name);
+  tip.innerHTML = '';
+  const when = document.createElement('div');
+  when.textContent = new Date(p.t).toLocaleString('en-GB', { day:'numeric', month:'short', hour:'2-digit', minute:'2-digit', second: stat.series.step < 60000 ? '2-digit' : undefined, hourCycle:'h23' });
+  const who = document.createElement('div');
+  who.textContent = holders.length ? 'Card: ' + holders.join(', ') : 'Card: idle';
+  who.className = 'muted';
+  tip.append(when, who);
+  tip.style.display = 'block';
+  tip.style.left = Math.min(innerWidth - tip.offsetWidth - 8, e.clientX + 14) + 'px';
+  tip.style.top = (e.clientY + 14) + 'px';
+});
+function resetVals() {
+  if (!stat) return;
+  for (const box of document.querySelectorAll('.chart')) {
+    const c = CHARTS.find((k) => k.f === box.dataset.f);
+    const now = [...stat.series.points].reverse().find((p) => p[c.f] != null)?.[c.f];
+    box.querySelector('.val').textContent = fmt(now, c.d, c.unit);
+  }
+}
+
+let statsTimer;
+async function loadStats() {
+  clearTimeout(statsTimer);
+  $('stats').classList.add('loading');
+  try { renderStats(await (await fetch(`/api/stats?range=${range}`, { cache: 'no-store' })).json()); }
+  catch { /* keep the last picture */ }
+  statsTimer = setTimeout(loadStats, range === '1h' ? 10_000 : 60_000);
+}
+dark.addEventListener('change', () => stat && renderStats(stat));
+
+refresh().then(loadStats);
 setInterval(refresh, 2000);
 </script>
 </body>

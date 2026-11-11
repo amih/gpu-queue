@@ -10,6 +10,9 @@ import { Scheduler, PRIORITIES, prioIndex } from './lib/scheduler.js';
 import { makeBackends } from './lib/backends.js';
 import { makeProxy } from './lib/proxy.js';
 import { gpuState, memoryWaiter } from './lib/gpu.js';
+import { makeStore } from './lib/store.js';
+import { startMetrics, RANGES } from './lib/metrics.js';
+import { timeline, stats } from './lib/report.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const log = (msg) => console.log(`${new Date().toISOString()} ${msg}`);
@@ -29,6 +32,8 @@ const DEFAULTS = {
   // The card counts as empty below this much used memory (MiB).
   emptyMiB: 1200,
   historySize: 500,
+  // Days of finished jobs and machine numbers kept on disk for the statistics.
+  keepDays: 30,
   clients: {},
 };
 
@@ -62,6 +67,10 @@ const sched = new Scheduler({
 });
 sched.paused = !!state.paused;
 sched.on('change', () => {});
+
+const store = makeStore(stateDir, { keepDays: cfg.keepDays, log });
+sched.on('finished', (j) => store.addJob({ ...j, priority: PRIORITIES[j.priority] ?? j.priority }));
+const metrics = startMetrics({ store, sched });
 // Aging can change the order with no new event.
 setInterval(() => sched.pump(), 5000).unref();
 
@@ -70,17 +79,13 @@ const { server: proxy } = makeProxy({ sched, backends, priorityOf, log });
 // ---- status page ----
 function clientStats() {
   const names = new Set([...Object.keys(cfg.clients), ...Object.keys(state.clients)]);
-  const all = [...sched.history, ...sched.running.values(), ...sched.waiting];
+  const all = [...store.recentJobs(2000), ...sched.running.values(), ...sched.waiting];
   for (const j of all) names.add(j.client);
   return [...names].sort().map((name) => {
-    const done = sched.history.filter((j) => j.client === name && j.startedAt);
-    const waits = done.map((j) => (j.startedAt - j.queuedAt) / 1000).sort((a, b) => a - b);
-    const pick = (q) => (waits.length ? waits[Math.min(waits.length - 1, Math.floor(q * waits.length))] : null);
     return {
       name, priority: priorityOf(name), note: cfg.clients[name]?.note ?? '',
       waiting: sched.waiting.filter((j) => j.client === name).length,
       running: [...sched.running.values()].filter((j) => j.client === name).length,
-      recent: done.length, medianWait: pick(0.5), p95Wait: pick(0.95),
     };
   });
 }
@@ -105,10 +110,24 @@ const status = http.createServer(async (req, res) => {
     return res.end(page);
   }
   if (req.method === 'GET' && url.pathname === '/api/status') {
+    const lines = Math.min(500, Math.max(10, Number(url.searchParams.get('lines')) || 60));
     return sendJson(res, 200, {
       now: Date.now(), gpu: await gpuState(), ...sched.snapshot(), clients: clientStats(),
+      timeline: timeline(store.recentJobs(20_000), lines),
       priorities: PRIORITIES, settings: { ageStepSeconds: cfg.ageStepSeconds, batchSeconds: cfg.batchSeconds },
     });
+  }
+  // The jobs folded into one timeline line: those that ended between two times.
+  if (req.method === 'GET' && url.pathname === '/api/jobs') {
+    const from = Number(url.searchParams.get('from'));
+    const to = Number(url.searchParams.get('to'));
+    return sendJson(res, 200, store.jobsSince(from).filter((j) => j.endedAt <= to).reverse().slice(0, 2000));
+  }
+  if (req.method === 'GET' && url.pathname === '/api/stats') {
+    const range = RANGES[url.searchParams.get('range')] ? url.searchParams.get('range') : '24h';
+    const series = metrics.series(range);
+    const running = [...sched.running.values()].map((j) => ({ ...j, endedAt: null }));
+    return sendJson(res, 200, { range, ...stats(store.jobsSince(series.from), running, series.from, series.to), series });
   }
   if (req.method === 'POST' && url.pathname.startsWith('/api/')) {
     // JSON only: a plain cross-site form cannot send this content type.

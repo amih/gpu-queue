@@ -12,8 +12,9 @@ gpu-queue sits between those programs and the card. Every piece of GPU work wait
 - **Programs that work in steps keep their turn.** A program that reads a photo, thinks on the CPU, then reads the next keeps first claim on the card for a short grace period after each step, so lower-priority work doesn't slip into every gap.
 - **Fewer model reloads.** Loading a model costs 10–30 seconds, so the model already on the card is preferred for a while when others of the same priority wait.
 - **A status page** that shows what holds the card, who is waiting and for how long, and how long each program usually waits. From it you can pause the queue, cancel a waiting job, or change a priority.
+- **History and statistics.** Runs of alike jobs fold into one line ("Done ×73, 2 failed"), so a screen covers hours, not minutes. Pick the last hour, 6 or 24 hours, 7 or 30 days to see who had the card when, how long each program waited and ran, and charts of the card (busy, memory, heat, power), the processor, memory, load and the queue. No Prometheus or Grafana needed: it samples every 10 seconds and keeps one-minute averages on disk.
 - **No changes to your apps.** Point their Ollama or ComfyUI address at the queue. Anything else (an upscaler, whisper, a training script) runs through a one-line wrapper.
-- **No dependencies.** Plain Node.js 20 or newer, about 850 lines with the status page.
+- **No dependencies.** Plain Node.js 20 or newer, about 1,450 lines with the status page.
 
 It was built for a home server with one GTX 1080: a book-scanning app, an image generator, a Wikipedia question page and a bulk PubMed embedder all share that one card.
 
@@ -102,7 +103,7 @@ Environment:
 | `PORT` | `3891` | the status page |
 | `GPUQ_HOST` | `127.0.0.1` | both listen here only |
 | `GPUQ_CONFIG` | `./config.json` | |
-| `GPUQ_STATE_DIR` | `./data` | priorities and pause set on the status page |
+| `GPUQ_STATE_DIR` | `./data` | priorities and pause set on the status page, and the history: `jobs.jsonl` (one line per finished job) and `metrics.jsonl` (one line per minute) |
 | `GPU_QUEUE_URL` | `http://127.0.0.1:3890` | for `gpu-lease` |
 
 `config.json`:
@@ -117,6 +118,7 @@ Environment:
 | `graceSeconds` | `30` | after a job ends, its group keeps first claim this long against lower priorities |
 | `emptyMiB` | `1200` | the card counts as empty below this much used memory, not counting the memory of the program taking over |
 | `procMatch` | `{"ollama":"ollama","comfy":"comfy"}` | how to recognise each backend's processes in `nvidia-smi` |
+| `keepDays` | `30` | days of job history and machine numbers kept on disk |
 | `clients` | | `{ "name": { "priority": "...", "note": "..." } }` |
 
 ### As a service
