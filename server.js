@@ -113,7 +113,7 @@ const status = http.createServer(async (req, res) => {
     const lines = Math.min(500, Math.max(10, Number(url.searchParams.get('lines')) || 60));
     return sendJson(res, 200, {
       now: Date.now(), gpu: await gpuState(), ...sched.snapshot(), clients: clientStats(),
-      timeline: timeline(store.recentJobs(20_000), lines),
+      timeline: timeline(store.recentJobs(20_000), lines, 2),
       priorities: PRIORITIES, settings: { ageStepSeconds: cfg.ageStepSeconds, batchSeconds: cfg.batchSeconds },
     });
   }

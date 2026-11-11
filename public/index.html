@@ -30,7 +30,7 @@
   .p-background { color: var(--muted); }
   .empty { color: var(--muted); padding: 8px 0; }
   .paused { color: var(--warn); font-weight:600; }
-  .st { display:inline-block; min-width:78px; text-align:center; font-size:12px; font-weight:600; padding:2px 8px; border-radius:10px; white-space:nowrap; }
+  .st { display:inline-block; min-width:86px; text-align:center; font-size:12px; font-weight:600; padding:2px 8px; border-radius:10px; white-space:nowrap; }
   .st-running { background:#2f8f5b; color:#fff; }
   .st-waiting { background:#e8a33d; color:#1d1d1b; }
   .st-done { background:var(--line); color:var(--muted); }
@@ -41,8 +41,19 @@
   tr.r-done td, tr.r-cancelled td { color: var(--muted); }
   tr.r-failed td { background: rgba(200,68,58,.08); }
   .legend { display:flex; gap:10px; flex-wrap:wrap; margin:0 0 8px; }
+  #jobs { overflow-x:auto; }
+  table.jobs { table-layout:fixed; min-width:900px; }
+  table.jobs td { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; height:37px; }
+  table.jobs td:last-child { white-space:nowrap; }
+  table.jobs tbody.now tr:last-child td { border-bottom:2px solid var(--muted); }
+  tr.r-idle td { color:var(--muted); }
+  .st-idle { background:transparent; color:var(--muted); border:1px solid var(--line); }
+  .st .count { font-weight:700; margin-left:4px; }
+  .badge { font-size:11px; font-weight:600; padding:1px 6px; border-radius:8px; margin-left:4px; }
+  .badge-failed { background:#c8443a; color:#fff; }
+  .badge-cancelled { border:1px dashed var(--muted); color:var(--muted); }
+  #procs { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-height:1.45em; margin:0 0 6px; font-size:13px; }
   .grp td { cursor:pointer; }
-  .grp .count { font-weight:700; margin-left:4px; }
   tr.member td { font-size:13px; padding-top:3px; padding-bottom:3px; }
   tr.member td:first-child { padding-left:28px; }
   .more { margin-top:8px; }
@@ -78,7 +89,7 @@
 
   <div class="row" id="tiles"></div>
 
-  <h2>Jobs <span class="muted" id="jobnote"></span></h2>
+  <h2>Jobs <span class="muted" id="jobnote" style="font-weight:400;font-size:13px"></span></h2>
   <p class="muted" id="procs"></p>
   <div id="jobs"></div>
   <button class="more" id="more" onclick="moreLines()">Show older</button>
@@ -109,6 +120,15 @@ const secs = (ms) => {
   if (s < 3600) return Math.floor(s / 60) + ' min ' + (s % 60) + ' s';
   if (s < 86400) return Math.floor(s / 3600) + ' h ' + Math.floor((s % 3600) / 60) + ' min';
   return Math.floor(s / 86400) + ' d ' + Math.floor((s % 86400) / 3600) + ' h';
+};
+// Short form for table cells.
+const dur = (ms) => {
+  if (ms == null) return '–';
+  const s = Math.round(ms / 1000);
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+  return Math.floor(s / 86400) + 'd ' + Math.floor((s % 86400) / 3600) + 'h';
 };
 const clock = (t) => t ? new Date(t).toLocaleTimeString('en-GB', { hour:'2-digit', minute:'2-digit', second:'2-digit', hourCycle:'h23' }) : '';
 const hm = (t) => new Date(t).toLocaleTimeString('en-GB', { hour:'2-digit', minute:'2-digit', hourCycle:'h23' });
@@ -162,17 +182,17 @@ function jobRow(j, d, cls = '') {
   const st = j.st;
   const prio = st === 'waiting' && j.effective !== j.priority
     ? `${pill(j.effective)} <span class="muted">(was ${j.priority})</span>` : pill(j.priority);
-  const waited = secs((j.startedAt ?? (st === 'waiting' ? d.now : j.endedAt)) - j.queuedAt);
-  const ran = st === 'running' ? secs(d.now - j.startedAt) : j.startedAt && j.endedAt ? secs(j.endedAt - j.startedAt) : '–';
-  const when = st === 'running' ? `started ${clock(j.startedAt)}` : st === 'waiting' ? `${j.place === 1 ? 'next' : '#' + j.place} · since ${clock(j.queuedAt)}` : (sameDay(j.endedAt, d.now) ? '' : dayHm(j.endedAt).split(' ').slice(0, 2).join(' ') + ' ') + clock(j.endedAt);
+  const waited = dur((j.startedAt ?? (st === 'waiting' ? d.now : j.endedAt)) - j.queuedAt);
+  const ran = st === 'running' ? dur(d.now - j.startedAt) : j.startedAt && j.endedAt ? dur(j.endedAt - j.startedAt) : '–';
+  const when = st === 'running' ? clock(j.startedAt) : st === 'waiting' ? `${j.place === 1 ? 'next' : '#' + j.place} · ${hm(j.queuedAt)}` : (sameDay(j.endedAt, d.now) ? '' : dayHm(j.endedAt).split(' ').slice(0, 2).join(' ') + ' ') + clock(j.endedAt);
   const actions = st !== 'waiting' ? (j.note ? `<span class="muted">${esc(j.note)}</span>` : '') :
     `<select onchange="post('/api/jobs/${esc(j.id)}/priority',{priority:this.value})">${priorities.map((p) =>
       `<option ${p === j.priority ? 'selected' : ''}>${p}</option>`).join('')}</select>
      <button onclick="post('/api/jobs/${esc(j.id)}/cancel')">Cancel</button>`;
   return `<tr class="r-${st} ${cls}">
-    <td><span class="st st-${st}">${STATUS[st]}</span></td>
-    <td>${esc(j.client)}</td><td>${esc(j.label)}</td><td>${prio}</td>
-    <td class="when">${when}</td><td class="num">${waited}</td><td class="num">${ran}</td><td>${actions}</td></tr>`;
+    <td><span class="st st-${st}">${STATUS[st]}${j.count > 1 ? `<span class="count">×${j.count}</span>` : ''}</span></td>
+    <td title="${esc(j.client)}">${esc(j.client)}</td><td title="${esc(j.label)}">${esc(j.label)}</td><td>${prio}</td>
+    <td class="when">${when}</td><td class="num">${waited}</td><td class="num">${ran}</td><td title="${esc(j.note)}">${actions}</td></tr>`;
 }
 
 function groupRow(g, d) {
@@ -181,12 +201,12 @@ function groupRow(g, d) {
   const isOpen = open.has(key);
   const span = sameDay(g.firstEndedAt, g.endedAt) ? `${dayHm(g.firstEndedAt)}–${hm(g.endedAt)}` : `${dayHm(g.firstEndedAt)} – ${dayHm(g.endedAt)}`;
   let html = `<tr class="r-${st} grp" onclick="toggle('${esc(key)}')" title="${isOpen ? 'Fold' : 'Show each job'}">
-    <td><span class="st st-${st}">${STATUS[st]}<span class="count">×${g.count}</span></span>${g.failed ? ` <span class="st st-failed" style="min-width:0">${g.failed} failed</span>` : ''}${g.cancelled ? ` <span class="st st-cancelled" style="min-width:0">${g.cancelled} cancelled</span>` : ''}</td>
-    <td>${esc(g.client)}</td><td>${isOpen ? '▾' : '▸'} ${esc(g.label)}</td><td>${pill(g.priority)}</td>
+    <td><span class="st st-${st}">${STATUS[st]}<span class="count">×${g.count}</span></span>${g.failed ? `<span class="badge badge-failed" title="${g.failed} failed">${g.failed}✕</span>` : ''}${g.cancelled ? `<span class="badge badge-cancelled" title="${g.cancelled} cancelled">${g.cancelled}</span>` : ''}</td>
+    <td>${esc(g.client)}</td><td title="${esc(g.label)}">${isOpen ? '▾' : '▸'} ${esc(g.label)}</td><td>${pill(g.priority)}</td>
     <td class="when">${span}</td>
-    <td class="num">${g.medianWait == null ? '–' : '≈' + secs(g.medianWait)}${g.maxWait > 2 * (g.medianWait || 0) && g.maxWait > 5000 ? ` <span class="muted">(max ${secs(g.maxWait)})</span>` : ''}</td>
-    <td class="num">${g.totalRan ? secs(g.totalRan) : '–'}</td>
-    <td class="muted">${g.medianRan ? `≈${secs(g.medianRan)} each` : ''}</td></tr>`;
+    <td class="num" title="${g.maxWait != null ? 'longest wait ' + dur(g.maxWait) : ''}">${g.medianWait == null ? '–' : '≈' + dur(g.medianWait)}</td>
+    <td class="num">${g.totalRan ? dur(g.totalRan) : '–'}</td>
+    <td class="muted">${g.medianRan ? `≈${dur(g.medianRan)} each` : ''}</td></tr>`;
   const o = open.get(key);
   if (isOpen) {
     html += o?.jobs ? o.jobs.map((j) => jobRow({ ...j, st: STATUS[j.state] ? j.state : 'done' }, d, 'member')).join('')
@@ -215,18 +235,31 @@ function render(d) {
     ? `Last switch: ${d.lastSwitch.from || '(start)'} → ${d.lastSwitch.to} at ${clock(d.lastSwitch.at)}, card emptied in ${secs(d.lastSwitch.ms)}.`
     : 'Every program that uses the graphics card waits its turn here.';
 
-  const procs = (g?.procs || []).map((p) => `${esc(p.name)} ${(p.memMiB / 1024).toFixed(1)} GB`).join(' · ');
-  $('procs').textContent = procs ? `Using the card now: ${procs}` : '';
+  const procs = (g?.procs || []).map((p) => `${p.name} ${(p.memMiB / 1024).toFixed(1)} GB`).join(' · ');
+  $('procs').textContent = procs ? `On the card: ${procs}` : '\u00a0';
 
   // One timeline, future at the top: waiting (the next job just above the running ones),
   // then running, then finished (newest first) with runs of alike jobs folded.
-  const rows = [
-    ...d.waiting.map((j, i) => ({ ...j, st: 'waiting', place: i + 1 })).reverse().map((j) => jobRow(j, d)),
-    ...d.running.map((j) => jobRow({ ...j, st: 'running' }, d)),
-    ...d.timeline.lines.map((l) => l.folded ? groupRow(l, d) : jobRow({ ...l, st: STATUS[l.state] ? l.state : 'done' }, d)),
+  // Now (above the thick line): waiting, the next job lowest, then what runs, with jobs
+  // of one program doing the same work side by side shown as one line. When nothing
+  // runs, an "Idle" line keeps the place so the history below does not jump.
+  const runs = [];
+  for (const j of [...d.running].sort((a, b) => a.startedAt - b.startedAt)) {
+    const r = runs.find((x) => x.client === j.client && x.label === j.label);
+    if (r) { r.count++; r.queuedAt = Math.min(r.queuedAt, j.queuedAt); } else runs.push({ ...j, st: 'running', count: 1 });
+  }
+  const MAXWAIT = 8;
+  const waiting = d.waiting.map((j, i) => ({ ...j, st: 'waiting', place: i + 1 }));
+  const now = [
+    ...(waiting.length > MAXWAIT ? [`<tr class="r-waiting"><td colspan="8" class="muted">and ${waiting.length - MAXWAIT} more waiting</td></tr>`] : []),
+    ...waiting.slice(0, MAXWAIT).reverse().map((j) => jobRow(j, d)),
+    ...(runs.length ? runs.map((j) => jobRow(j, d)) : [`<tr class="r-idle"><td><span class="st st-idle">${d.paused ? 'Paused' : 'Idle'}</span></td><td colspan="7" class="muted">${d.resident ? 'Nothing running · ' + esc(d.resident.group) + ' still loaded' : 'Nothing running'}</td></tr>`]),
   ];
-  $('jobnote').textContent = `(${d.running.length} running, ${d.waiting.length} waiting · runs of 3 or more alike jobs are folded; click one to open it)`;
-  $('jobs').innerHTML = table(rows, ['Status', 'Program', 'Work', 'Priority', 'When', 'Waited', 'Ran', ''], 'No jobs yet.');
+  const past = d.timeline.lines.map((l) => l.folded ? groupRow(l, d) : jobRow({ ...l, st: STATUS[l.state] ? l.state : 'done' }, d));
+  $('jobnote').textContent = `· ${d.running.length} running, ${d.waiting.length} waiting · alike jobs in a row are folded; click one to open it`;
+  $('jobs').innerHTML = `<table class="jobs"><colgroup><col style="width:150px"><col style="width:100px"><col><col style="width:108px"><col style="width:112px"><col style="width:78px"><col style="width:84px"><col style="width:150px"></colgroup>
+    <thead><tr>${['Status', 'Program', 'Work', 'Priority', 'When', 'Waited', 'Ran', ''].map((h, i) => `<th${i === 5 || i === 6 ? ' style="text-align:right"' : ''}>${h}</th>`).join('')}</tr></thead>
+    <tbody class="now">${now.join('')}</tbody><tbody>${past.join('') || '<tr><td colspan="8" class="muted">No jobs yet.</td></tr>'}</tbody></table>`;
   $('more').style.display = d.timeline.more ? '' : 'none';
 
   $('clients').innerHTML = table(d.clients.map((c) => `<tr><td><b>${esc(c.name)}</b><br><span class="muted">${esc(c.note)}</span></td>
