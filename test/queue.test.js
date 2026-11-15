@@ -133,6 +133,27 @@ test('a lease waits for running work and holds the card until released', async (
   assert.ok(events.includes('ollama end chat after'));
 });
 
+test('a lease takes its fields from a JSON body, and names an anonymous caller after its user', async () => {
+  const hold = async (init) => {
+    const ctrl = new AbortController();
+    const res = await fetch(`http://127.0.0.1:${PROXY}/lease`, { method: 'POST', signal: ctrl.signal, ...init });
+    const reader = res.body.getReader();
+    let text = '';
+    while (!/granted/.test(text)) text += new TextDecoder().decode((await reader.read()).value);
+    const s = await fetch(`http://127.0.0.1:${STATUS}/api/status`).then((r) => r.json());
+    ctrl.abort();
+    await sleep(50);
+    return s.running[0];
+  };
+  const a = await hold({ headers: { 'content-type': 'application/json' }, body: JSON.stringify({ client: 'trainer', label: 'train.py', priority: 'background' }) });
+  assert.equal(a.client, 'trainer');
+  assert.equal(a.label, 'train.py');
+  assert.equal(a.priority, 'background');
+  const b = await hold({});
+  assert.notEqual(b.client, 'lease', 'named after the Unix user');
+  assert.match(b.label, /no label given/);
+});
+
 test('gpu-lease runs the command once granted and passes its exit code', async () => {
   const run = (cmd) => new Promise((resolve) => {
     const p = spawn(process.execPath, [join(root, 'bin/gpu-lease'), '-c', 'cli', '--', ...cmd],
