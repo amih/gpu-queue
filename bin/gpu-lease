@@ -6,6 +6,10 @@
 //
 // GPU_QUEUE_URL (default http://127.0.0.1:3890) says where the queue is. If the queue
 // cannot be reached the command runs anyway, with a warning; --strict makes that an error.
+//
+// If the queue restarts, gpu-lease connects again. A command that is already running
+// keeps running and gets its lease back ahead of everything else; one still waiting for
+// the card takes its place in the queue again.
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { basename } from 'node:path';
@@ -33,31 +37,86 @@ const base = new URL(process.env.GPU_QUEUE_URL || 'http://127.0.0.1:3890');
 const q = new URLSearchParams({ client: opts.client || basename(args[0]), label: opts.label || args.map((a) => basename(a)).join(' ').slice(0, 120) });
 if (opts.priority) q.set('priority', opts.priority);
 
+// How long to keep trying after the queue went away, before a waiting command runs
+// without it (or, with --strict, gives up). A running command never stops for this.
+const GIVE_UP_WAITING_MS = Number(process.env.GPU_LEASE_RECONNECT_MS || 5 * 60_000);
+const say = (msg) => console.error(`gpu-lease: ${msg}`);
+
 let child = null;
-const run = (req) => {
+let req = null;
+let firstGrant = null;   // when the command first got the card
+let everConnected = false;
+let lostAt = null;
+let retries = 0;
+let stopped = false;     // no more reconnecting
+
+function run() {
+  firstGrant = Date.now();
   child = spawn(args[0], args.slice(1), { stdio: 'inherit' });
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => child.kill(sig));
-  child.on('error', (e) => { console.error(`gpu-lease: ${e.message}`); req?.destroy(); process.exit(127); });
-  child.on('exit', (code, sig) => { req?.destroy(); process.exit(code ?? (sig ? 128 : 1)); });
-};
+  child.on('error', (e) => { say(e.message); stopped = true; req?.destroy(); process.exit(127); });
+  child.on('exit', (code, sig) => { stopped = true; req?.destroy(); process.exit(code ?? (sig ? 128 : 1)); });
+}
 
-const req = http.request(new URL(`/lease?${q}`, base), { method: 'POST' }, (res) => {
-  let buf = '';
-  res.setEncoding('utf8');
-  res.on('data', (chunk) => {
-    if (child) return;
-    buf += chunk;
-    if (/^granted /m.test(buf)) run(req);
-    else if (/^refused /m.test(buf)) { console.error(`gpu-lease: ${buf.match(/^refused (.*)$/m)[1]}`); process.exit(75); }
+function connect() {
+  const query = new URLSearchParams(q);
+  if (child) { query.set('resume', '1'); query.set('since', String(firstGrant)); }
+  let closed = false;
+  let granted = false;
+  const lost = () => {
+    if (closed) return;
+    closed = true;
+    if (stopped) return;
+    lostAt ??= Date.now();
+    if (!child && Date.now() - lostAt > GIVE_UP_WAITING_MS) {
+      if (opts.strict) { say('the queue did not come back'); process.exit(75); }
+      say('the queue did not come back; running without it');
+      stopped = true;
+      return run();
+    }
+    if (retries === 0) say(child ? 'lost the queue; the command keeps running, connecting again' : 'lost the queue; connecting again');
+    const wait = Math.min(15_000, 1000 * 2 ** retries++);
+    setTimeout(connect, wait);
+  };
+  req = http.request(new URL(`/lease?${query}`, base), { method: 'POST' }, (res) => {
+    everConnected = true;
+    let buf = '';
+    res.setEncoding('utf8');
+    res.on('data', (chunk) => {
+      if (granted) return;
+      buf += chunk;
+      if (/^granted /m.test(buf)) {
+        granted = true;
+        if (lostAt) say(child ? 'lease restored' : 'connected again');
+        lostAt = null;
+        retries = 0;
+        if (!child) run();
+      } else if (/^queued /m.test(buf) && lostAt && !child) {
+        lostAt = null; retries = 0; say('back in the queue');
+      } else if (/^refused /m.test(buf)) {
+        const why = buf.match(/^refused (.*)$/m)[1];
+        stopped = true;
+        if (child) { say(`${why}; the command keeps running without a lease`); return; }
+        say(why);
+        process.exit(75);
+      }
+    });
+    res.on('end', lost);
+    res.on('error', lost);
   });
-  res.on('end', () => { if (!child) { console.error('gpu-lease: the queue closed the lease'); process.exit(75); } });
-});
-req.on('error', (e) => {
-  if (child) return;
-  if (opts.strict) { console.error(`gpu-lease: queue unreachable (${e.message})`); process.exit(75); }
-  console.error(`gpu-lease: queue unreachable (${e.message}); running without it`);
-  run(null);
-});
-req.end();
+  req.on('error', (e) => {
+    if (!everConnected && !child) {
+      closed = true;
+      if (opts.strict) { say(`queue unreachable (${e.message})`); process.exit(75); }
+      say(`queue unreachable (${e.message}); running without it`);
+      stopped = true;
+      return run();
+    }
+    lost();
+  });
+  req.end();
+}
+
+connect();
 // Waiting for the card: a signal cancels the wait.
-for (const sig of ['SIGINT', 'SIGTERM']) process.once(sig, () => { if (!child) { req.destroy(); process.exit(130); } });
+for (const sig of ['SIGINT', 'SIGTERM']) process.once(sig, () => { if (!child) { stopped = true; req?.destroy(); process.exit(130); } });

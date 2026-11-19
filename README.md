@@ -73,7 +73,7 @@ The card is held until ComfyUI no longer lists the prompt in its queue.
 gpu-lease -c upscaler -p background -- realesrgan-ncnn-vulkan -i in.jpg -o out.jpg
 ```
 
-The command starts once the card is free. While it runs it holds the card alone: everything else waits, and the card was emptied before it started. When the command ends, or is killed, the card is given back, because the lease is the open connection itself. If the queue cannot be reached, the command runs anyway with a warning (`--strict` makes that an error).
+The command starts once the card is free. While it runs it holds the card alone: everything else waits, and the card was emptied before it started. When the command ends, or is killed, the card is given back, because the lease is the open connection itself. If the queue restarts while the command runs, the command keeps running and `gpu-lease` connects again: its lease comes back ahead of everything else, without waiting for the card to empty, and keeps its first start time. A command still waiting takes its place in the queue again; if the queue stays away for 5 minutes (`GPU_LEASE_RECONNECT_MS`), it runs without it. If the queue cannot be reached, the command runs anyway with a warning (`--strict` makes that an error).
 
 From another language, the same thing is one HTTP call. `POST /lease?client=<name>&priority=<level>&label=<what it does>` (or the same fields as a JSON body) answers `queued <id>`, then `granted <id>` when the card is yours. Keep the connection open while you work, then close it. Without `client`, the lease is named after the caller's Unix user; without `label`, the status page says no label was given. Give a label: it is what the page shows as the work.
 
