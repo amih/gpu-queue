@@ -13,6 +13,7 @@ import { gpuState, memoryWaiter } from './lib/gpu.js';
 import { makeStore } from './lib/store.js';
 import { startMetrics, RANGES } from './lib/metrics.js';
 import { timeline, stats } from './lib/report.js';
+import { makeDaily, digestFinishedDays } from './lib/daily.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const log = (msg) => console.log(`${new Date().toISOString()} ${msg}`);
@@ -34,6 +35,8 @@ const DEFAULTS = {
   historySize: 500,
   // Days of finished jobs and machine numbers kept on disk for the statistics.
   keepDays: 30,
+  // Optional, for the long-term table: { "pricePerKWh": 0.6, "currency": "ILS" }.
+  electricity: null,
   clients: {},
 };
 
@@ -71,6 +74,11 @@ sched.on('change', () => {});
 const store = makeStore(stateDir, { keepDays: cfg.keepDays, log });
 sched.on('finished', (j) => store.addJob({ ...j, priority: PRIORITIES[j.priority] ?? j.priority }));
 const metrics = startMetrics({ store, sched });
+// One line per finished day, never trimmed: card hours and power for the long run.
+const daily = makeDaily(stateDir, { log });
+const digest = () => { try { digestFinishedDays({ store, daily, sched, log }); } catch (e) { log(`daily digest failed: ${e.message}`); } };
+digest();
+setInterval(digest, 10 * 60_000).unref();
 // Aging can change the order with no new event.
 setInterval(() => sched.pump(), 5000).unref();
 
@@ -128,6 +136,17 @@ const status = http.createServer(async (req, res) => {
     const series = metrics.series(range);
     const running = [...sched.running.values()].map((j) => ({ ...j, endedAt: null }));
     return sendJson(res, 200, { range, ...stats(store.jobsSince(series.from), running, series.from, series.to), series });
+  }
+  if (req.method === 'GET' && url.pathname === '/api/daily') {
+    return sendJson(res, 200, { days: daily.all(), gpuName: metrics.info.gpuName, electricity: cfg.electricity });
+  }
+  if (req.method === 'GET' && url.pathname === '/api/daily.csv') {
+    const cols = ['date', 'recordedMinutes', 'gpuHours', 'busyHours', 'energyKWh', 'avgW', 'idleW', 'loadW', 'peakW', 'avgBusy', 'jobs', 'failed'];
+    const names = [...new Set(daily.all().flatMap((d) => Object.keys(d.clients || {})))].sort();
+    const head = [...cols, ...names.map((n) => `${n}GpuHours`)].join(',');
+    const rows = daily.all().map((d) => [...cols.map((c) => d[c] ?? ''), ...names.map((n) => d.clients?.[n]?.gpuHours ?? '')].join(','));
+    res.writeHead(200, { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': 'attachment; filename="gpu-daily.csv"', 'cache-control': 'no-store' });
+    return res.end([head, ...rows].join('\n') + '\n');
   }
   if (req.method === 'POST' && url.pathname.startsWith('/api/')) {
     // JSON only: a plain cross-site form cannot send this content type.

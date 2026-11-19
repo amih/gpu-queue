@@ -105,6 +105,15 @@
     <div class="charts" id="charts"></div>
   </div>
 
+  <h2>Long term <span class="muted" style="font-weight:400;font-size:13px">· one line per day, kept for good · <a href="/api/daily.csv" style="color:inherit">CSV</a></span></h2>
+  <p class="muted" style="font-size:13px;margin-top:0">Power is the graphics card alone, as nvidia-smi reports it, not the whole machine. <i>Card hours</i>: some program held the card through the queue. <i>Busy hours</i>: each minute counted by how busy the card was.</p>
+  <div class="row" id="ltiles"></div>
+  <h2 style="font-size:14px">By month</h2>
+  <div id="lmonths" style="overflow-x:auto"></div>
+  <h2 style="font-size:14px">By day</h2>
+  <div id="ldays" style="overflow-x:auto"></div>
+  <button class="more" id="ldaysmore" style="display:none">Show all days</button>
+
   <h2>Programs</h2>
   <p class="muted">Priority decides who goes first. A job that waits 10 minutes moves up one level, so background work still gets its turn.</p>
   <div id="clients"></div>
@@ -425,7 +434,56 @@ async function loadStats() {
 }
 dark.addEventListener('change', () => stat && renderStats(stat));
 
-refresh().then(loadStats);
+// ---------- long term ----------
+let allDays = false;
+$('ldaysmore').onclick = () => { allDays = true; loadDaily(); };
+const n1 = (v, d = 1) => v == null ? '–' : Number(v).toFixed(d);
+function sumRows(rows) {
+  const t = { recordedMinutes: 0, dayMinutes: 0, gpuHours: 0, busyHours: 0, energyKWh: 0, jobs: 0, failed: 0, clients: {} };
+  for (const d of rows) {
+    for (const k of ['recordedMinutes', 'dayMinutes', 'gpuHours', 'busyHours', 'energyKWh', 'jobs', 'failed']) t[k] += d[k] || 0;
+    for (const [n, c] of Object.entries(d.clients || {})) t.clients[n] = (t.clients[n] || 0) + (c.gpuHours || 0);
+  }
+  const avg = (k) => { const v = rows.filter((d) => d[k] != null); const m = v.reduce((a, d) => a + d.recordedMinutes, 0); return m ? v.reduce((a, d) => a + d[k] * d.recordedMinutes, 0) / m : null; };
+  t.avgW = t.recordedMinutes ? t.energyKWh * 1000 * 60 / t.recordedMinutes : null;
+  t.idleW = avg('idleW'); t.loadW = avg('loadW');
+  t.peakW = rows.reduce((a, d) => Math.max(a, d.peakW ?? 0), 0) || null;
+  return t;
+}
+const topClients = (c) => Object.entries(c).map(([n, v]) => [n, typeof v === 'number' ? v : v.gpuHours]).filter(([, h]) => h >= 0.05)
+  .sort((a, b) => b[1] - a[1]).slice(0, 4).map(([n, h]) => `${esc(n)} ${h.toFixed(1)} h`).join(', ');
+function lrow(label, d, el) {
+  const cov = d.dayMinutes ? d.recordedMinutes / d.dayMinutes : 0;
+  const cost = el?.pricePerKWh != null ? `<td class="num">${(d.energyKWh * el.pricePerKWh).toFixed(2)} ${esc(el.currency || '')}</td>` : '';
+  return `<tr><td class="when">${label}</td><td class="num">${Math.round(100 * cov)}%</td><td class="num">${n1(d.gpuHours)}</td><td class="num">${n1(d.busyHours)}</td>
+    <td class="num">${n1(d.energyKWh, 2)}</td>${cost}<td class="num">${n1(d.avgW, 0)}</td><td class="num">${n1(d.idleW, 0)}</td><td class="num">${n1(d.loadW, 0)}</td><td class="num">${n1(d.peakW, 0)}</td>
+    <td class="num">${(d.jobs || 0).toLocaleString('en')}</td><td class="muted" style="font-size:13px">${topClients(d.clients || {})}</td></tr>`;
+}
+function renderDaily(r) {
+  const days = r.days || [];
+  const el = r.electricity;
+  const head = ['Period', 'Recorded', 'Card hours', 'Busy hours', 'Energy kWh', ...(el?.pricePerKWh != null ? ['Electricity'] : []), 'Average W', 'Idle W', 'Working W', 'Peak W', 'Jobs', 'Most card time'];
+  if (!days.length) { $('ltiles').innerHTML = ''; $('lmonths').innerHTML = '<div class="empty">The first line is written after the first full day.</div>'; $('ldays').innerHTML = ''; return; }
+  const t = sumRows(days);
+  const last30 = sumRows(days.slice(-30));
+  $('ltiles').innerHTML = `
+    <div class="tile"><span class="muted">Card hours since ${esc(days[0].date)}</span><b>${n1(t.gpuHours)}</b><span class="muted">${n1(t.busyHours)} busy hours</span></div>
+    <div class="tile"><span class="muted">Energy, card alone</span><b>${n1(t.energyKWh, 1)} kWh</b><span class="muted">last 30 days ${n1(last30.energyKWh, 1)} kWh</span></div>
+    <div class="tile"><span class="muted">Idle / working</span><b>${n1(t.idleW, 0)} / ${n1(t.loadW, 0)} W</b><span class="muted">peak ${n1(t.peakW, 0)} W</span></div>
+    <div class="tile"><span class="muted">Jobs</span><b>${t.jobs.toLocaleString('en')}</b><span class="muted">${days.length} days recorded</span></div>`;
+  const months = {};
+  for (const d of days) (months[d.date.slice(0, 7)] ||= []).push(d);
+  $('lmonths').innerHTML = table(Object.entries(months).reverse().map(([m, rows]) => lrow(new Date(m + '-15').toLocaleString('en-GB', { month: 'long', year: 'numeric' }), sumRows(rows), el)), head, '');
+  const shown = allDays ? days : days.slice(-31);
+  $('ldays').innerHTML = table([...shown].reverse().map((d) => lrow(new Date(d.date + 'T12:00').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }), d, el)), head, '');
+  $('ldaysmore').style.display = !allDays && days.length > shown.length ? '' : 'none';
+}
+async function loadDaily() {
+  try { renderDaily(await (await fetch('/api/daily', { cache: 'no-store' })).json()); } catch { /* keep */ }
+}
+setInterval(loadDaily, 15 * 60_000);
+
+refresh().then(loadStats).then(loadDaily);
 setInterval(refresh, 2000);
 </script>
 </body>
