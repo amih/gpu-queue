@@ -41,6 +41,7 @@ Every request that needs the card becomes a job. A job belongs to a group: one O
 - **Jobs of different groups never overlap.** When the card goes to another group, gpu-queue waits for the running jobs to finish and frees the memory. Ollama's models are unloaded (`keep_alive: 0`) and ComfyUI is told to free its memory (`POST /free`). Then it waits until the card's memory is almost empty (read from `nvidia-smi`) before starting the next job.
 - **Order:** priority (after aging) first, then the group already on the card (ahead of jobs that have waited less than `batchSeconds`), then arrival time.
 - **Grace period:** when the card goes idle, the group that just used it keeps first claim for `graceSeconds` against lower-priority work.
+- **Turns at the same priority:** two programs that each send one request at a time would swap the card after every request and reload the model each time. The program on the card keeps it `holdSeconds` after each request (time to send the next one), for at most `turnSeconds` while the other waits; then they swap.
 - **No preemption.** A running job is never stopped. A higher-priority job waits for the running ones to finish, but nothing new of a lower priority starts before it.
 
 Requests that don't load a model go straight through: listing models, unloading one, or a model forced onto the CPU with `num_gpu: 0`.
@@ -136,6 +137,8 @@ Environment:
 | `ageStepSeconds` | `[0, 600, 600]` | seconds of waiting before `normal` and `background` jobs move up one level |
 | `batchSeconds` | `300` | how long a job of the same priority can be overtaken by work for the model already on the card |
 | `graceSeconds` | `30` | after a job ends, its group keeps first claim this long against lower priorities |
+| `holdSeconds` | `1.5` | after a job ends, its group keeps the card this long against same-priority work of another model |
+| `turnSeconds` | `60` | the longest a group keeps the card that way while same-priority work of another model waits |
 | `emptyMiB` | `1200` | the card counts as empty below this much used memory, not counting the memory of the program taking over |
 | `procMatch` | `{"ollama":"ollama","comfy":"comfy"}` | how to recognise each backend's processes in `nvidia-smi` |
 | `keepDays` | `30` | days of job history and machine numbers kept on disk |

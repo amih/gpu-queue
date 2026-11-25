@@ -28,6 +28,12 @@ const DEFAULTS = {
   // After a job ends, its program keeps first claim on the card this long, so work that
   // comes in steps is not overtaken by lower-priority work in the gaps.
   graceSeconds: 30,
+  // Two programs at the same priority that each send one request at a time would swap the card after every
+  // request, reloading the model each time (25 Nov: a 4 s reload on a 4.8 s question, 28% of the card lost).
+  // The loaded model's program keeps the card for holdSeconds after each request (time to send its next one),
+  // for at most turnSeconds while others of the same priority wait; then they get their turn.
+  holdSeconds: 1.5,
+  turnSeconds: 60,
   // Leases started with `gpu-lease --yield` step aside for more urgent work (lib/scheduler.js): they keep the card at
   // least yieldMinRunSeconds after getting it, get it back after yieldReturnIdleSeconds without other work, and after
   // being paused yieldCapFraction of the last yieldCapWindowSeconds only yieldAlways clients can still interrupt them.
@@ -74,7 +80,7 @@ const backends = makeBackends(cfg);
 const sched = new Scheduler({
   backends,
   waitForMemory: memoryWaiter(cfg.emptyMiB, cfg.procMatch),
-  settings: { ageStepSeconds: cfg.ageStepSeconds, batchSeconds: cfg.batchSeconds, graceSeconds: cfg.graceSeconds, historySize: cfg.historySize,
+  settings: { ageStepSeconds: cfg.ageStepSeconds, batchSeconds: cfg.batchSeconds, graceSeconds: cfg.graceSeconds, holdSeconds: cfg.holdSeconds, turnSeconds: cfg.turnSeconds, historySize: cfg.historySize,
     yieldMinRunSeconds: cfg.yieldMinRunSeconds, yieldReturnIdleSeconds: cfg.yieldReturnIdleSeconds, yieldCapFraction: cfg.yieldCapFraction,
     yieldCapWindowSeconds: cfg.yieldCapWindowSeconds, yieldAlways: cfg.yieldAlways, yieldTimeoutSeconds: cfg.yieldTimeoutSeconds },
   log,
