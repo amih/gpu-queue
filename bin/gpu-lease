@@ -2,7 +2,12 @@
 // Runs a command once the GPU queue gives it the card, and gives the card back when the
 // command ends.
 //
-//   gpu-lease [-c client] [-p interactive|normal|background] [-l label] [--strict] -- command [args...]
+//   gpu-lease [-c client] [-p interactive|normal|background] [-l label] [--strict] [--yield] -- command [args...]
+//
+// --yield: the command can step aside for more urgent work and continue afterwards (a long training run). gpu-lease
+// gives it GPU_LEASE_CTL, a folder with a file `state`: "run", or "yield" when the queue asks for the card. The command
+// checks it between steps (python/gpu_yield.py does this), frees the card, writes "yielded" to the file `ack`, and
+// waits for `state` to say "run" again. Rules for when it is asked: lib/scheduler.js.
 //
 // GPU_QUEUE_URL (default http://127.0.0.1:3890) says where the queue is. If the queue
 // cannot be reached the command runs anyway, with a warning; --strict makes that an error.
@@ -12,16 +17,19 @@
 // the card takes its place in the queue again.
 import http from 'node:http';
 import { spawn } from 'node:child_process';
-import { basename } from 'node:path';
+import { basename, join } from 'node:path';
+import { mkdtempSync, writeFileSync, readFileSync, renameSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 
 const args = process.argv.slice(2);
-const opts = { client: null, priority: null, label: null, strict: false };
+const opts = { client: null, priority: null, label: null, strict: false, yield: false };
 while (args.length && args[0] !== '--') {
   const a = args.shift();
   if (a === '-c' || a === '--client') opts.client = args.shift();
   else if (a === '-p' || a === '--priority') opts.priority = args.shift();
   else if (a === '-l' || a === '--label') opts.label = args.shift();
   else if (a === '--strict') opts.strict = true;
+  else if (a === '--yield') opts.yield = true;
   else if (a === '-h' || a === '--help') usage(0);
   else { args.unshift(a); break; }
 }
@@ -29,13 +37,41 @@ if (args[0] === '--') args.shift();
 if (!args.length) usage(2);
 
 function usage(code) {
-  console.error('usage: gpu-lease [-c client] [-p interactive|normal|background] [-l label] [--strict] -- command [args...]');
+  console.error('usage: gpu-lease [-c client] [-p interactive|normal|background] [-l label] [--strict] [--yield] -- command [args...]');
   process.exit(code);
 }
 
 const base = new URL(process.env.GPU_QUEUE_URL || 'http://127.0.0.1:3890');
 const q = new URLSearchParams({ client: opts.client || basename(args[0]), label: opts.label || args.map((a) => basename(a)).join(' ').slice(0, 120) });
 if (opts.priority) q.set('priority', opts.priority);
+if (opts.yield) q.set('yield', '1');
+
+// --yield: the folder the command reads its orders from.
+const ctl = opts.yield ? mkdtempSync(join(tmpdir(), 'gpu-lease-')) : null;
+const setState = (v) => { if (ctl) { writeFileSync(join(ctl, 'state.tmp'), v); renameSync(join(ctl, 'state.tmp'), join(ctl, 'state')); } };
+if (ctl) { setState('run'); writeFileSync(join(ctl, 'ack'), ''); process.on('exit', () => rmSync(ctl, { recursive: true, force: true })); }
+let leaseId = null;
+let ackTimer = null;
+function onYield() {
+  setState('yield');
+  clearInterval(ackTimer);
+  const t0 = Date.now();
+  ackTimer = setInterval(() => {
+    let ack = '';
+    try { ack = readFileSync(join(ctl, 'ack'), 'utf8').trim(); } catch { /* not yet */ }
+    if (ack !== 'yielded') return;
+    clearInterval(ackTimer);
+    say(`stepped aside after ${Math.round((Date.now() - t0) / 1000)} s`);
+    const r = http.request(new URL(`/lease/yielded?id=${leaseId}`, base), { method: 'POST' }, (res) => res.resume());
+    r.on('error', (e) => say(`could not tell the queue: ${e.message}`));
+    r.end();
+  }, 500);
+}
+function onResume() {
+  clearInterval(ackTimer);
+  setState('run');
+  say('the card is back: continuing');
+}
 
 // How long to keep trying after the queue went away, before a waiting command runs
 // without it (or, with --strict, gives up). A running command never stops for this.
@@ -52,7 +88,7 @@ let stopped = false;     // no more reconnecting
 
 function run() {
   firstGrant = Date.now();
-  child = spawn(args[0], args.slice(1), { stdio: 'inherit' });
+  child = spawn(args[0], args.slice(1), { stdio: 'inherit', env: ctl ? { ...process.env, GPU_LEASE_CTL: ctl } : process.env });
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => child.kill(sig));
   child.on('error', (e) => { say(e.message); stopped = true; req?.destroy(); process.exit(127); });
   child.on('exit', (code, sig) => { stopped = true; req?.destroy(); process.exit(code ?? (sig ? 128 : 1)); });
@@ -83,10 +119,23 @@ function connect() {
     let buf = '';
     res.setEncoding('utf8');
     res.on('data', (chunk) => {
-      if (granted) return;
       buf += chunk;
+      if (granted) {
+        // After the grant: "yield <id>" and "resume <id>" lines for --yield leases.
+        const lines = buf.split('\n');
+        buf = lines.pop();
+        for (const line of lines) {
+          if (line.startsWith('yield ') && ctl) onYield();
+          else if (line.startsWith('resume ') && ctl) onResume();
+        }
+        return;
+      }
+      const id = buf.match(/^(?:queued|granted) (\S+)$/m);
+      if (id) leaseId = id[1];
       if (/^granted /m.test(buf)) {
         granted = true;
+        leaseId = buf.match(/^granted (\S+)$/m)?.[1] ?? leaseId;
+        buf = buf.slice(buf.indexOf('\n', buf.search(/^granted /m)) + 1);
         if (lostAt) say(child ? 'lease restored' : 'connected again');
         lostAt = null;
         retries = 0;

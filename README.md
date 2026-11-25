@@ -75,6 +75,25 @@ gpu-lease -c upscaler -p background -- realesrgan-ncnn-vulkan -i in.jpg -o out.j
 
 The command starts once the card is free. While it runs it holds the card alone: everything else waits, and the card was emptied before it started. When the command ends, or is killed, the card is given back, because the lease is the open connection itself. If the queue restarts while the command runs, the command keeps running and `gpu-lease` connects again: its lease comes back ahead of everything else, without waiting for the card to empty, and keeps its first start time. A command still waiting takes its place in the queue again; if the queue stays away for 5 minutes (`GPU_LEASE_RECONNECT_MS`), it runs without it. If the queue cannot be reached, the command runs anyway with a warning (`--strict` makes that an error).
 
+#### Long runs that step aside: `--yield`
+
+A training run can hold the card for hours. Started with `--yield`, it steps aside when more urgent work arrives and continues afterwards:
+
+```sh
+gpu-lease -c lab -p background --yield -- python train.py
+```
+
+`gpu-lease` gives the command `GPU_LEASE_CTL`, a folder with a file `state` that says `run` or `yield`. The command checks it between steps, frees the card, writes `yielded` to the file `ack`, waits for `run`, and takes the card back. For PyTorch, `python/gpu_yield.py` does all of this: `GpuYield(pause, resume).check()` in the training loop. Each pause costs the run the time to move its model off the card and back (seconds to half a minute), so three rules keep pauses few:
+
+| Setting | Default | Rule |
+|---|---|---|
+| `yieldMinRunSeconds` | 180 | Once it has the card, the run keeps it at least this long before it is asked again. |
+| `yieldReturnIdleSeconds` | 120 | It gets the card back only after the card has been free of other work this long. Work comes in bursts: one pause per burst, not one per request. |
+| `yieldCapFraction`, `yieldCapWindowSeconds` | 0.2, 3600 | After being paused this share of the last hour, only clients listed in `yieldAlways` can still interrupt it. |
+| `yieldTimeoutSeconds` | 120 | A run that does not step aside in time keeps the card and is not asked again for 10 minutes. |
+
+Only work of a higher priority than the run asks it to step aside. The status page shows a paused run as *Paused*, waiting for its turn.
+
 From another language, the same thing is one HTTP call. `POST /lease?client=<name>&priority=<level>&label=<what it does>` (or the same fields as a JSON body) answers `queued <id>`, then `granted <id>` when the card is yours. Keep the connection open while you work, then close it. Without `client`, the lease is named after the caller's Unix user; without `label`, the status page says no label was given. Give a label: it is what the page shows as the work.
 
 ### Priorities

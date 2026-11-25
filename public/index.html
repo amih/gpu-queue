@@ -158,7 +158,7 @@ function table(rows, head, emptyText) {
 }
 
 // ---------- jobs ----------
-const STATUS = { running: 'Running', waiting: 'Waiting', done: 'Done', failed: 'Failed', cancelled: 'Cancelled' };
+const STATUS = { running: 'Running', waiting: 'Waiting', done: 'Done', failed: 'Failed', cancelled: 'Cancelled', paused: 'Paused', yielding: 'Stepping aside' };
 let lines = 30;
 const open = new Map();   // folded line key -> { count, jobs }
 let last = null;

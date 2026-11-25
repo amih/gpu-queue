@@ -28,6 +28,15 @@ const DEFAULTS = {
   // After a job ends, its program keeps first claim on the card this long, so work that
   // comes in steps is not overtaken by lower-priority work in the gaps.
   graceSeconds: 30,
+  // Leases started with `gpu-lease --yield` step aside for more urgent work (lib/scheduler.js): they keep the card at
+  // least yieldMinRunSeconds after getting it, get it back after yieldReturnIdleSeconds without other work, and after
+  // being paused yieldCapFraction of the last yieldCapWindowSeconds only yieldAlways clients can still interrupt them.
+  yieldMinRunSeconds: 180,
+  yieldReturnIdleSeconds: 120,
+  yieldCapFraction: 0.2,
+  yieldCapWindowSeconds: 3600,
+  yieldAlways: [],
+  yieldTimeoutSeconds: 120,
   // Which GPU processes belong to which backend (matched against nvidia-smi's names).
   procMatch: { ollama: 'ollama', comfy: 'comfy' },
   // The card counts as empty below this much used memory (MiB).
@@ -65,7 +74,9 @@ const backends = makeBackends(cfg);
 const sched = new Scheduler({
   backends,
   waitForMemory: memoryWaiter(cfg.emptyMiB, cfg.procMatch),
-  settings: { ageStepSeconds: cfg.ageStepSeconds, batchSeconds: cfg.batchSeconds, graceSeconds: cfg.graceSeconds, historySize: cfg.historySize },
+  settings: { ageStepSeconds: cfg.ageStepSeconds, batchSeconds: cfg.batchSeconds, graceSeconds: cfg.graceSeconds, historySize: cfg.historySize,
+    yieldMinRunSeconds: cfg.yieldMinRunSeconds, yieldReturnIdleSeconds: cfg.yieldReturnIdleSeconds, yieldCapFraction: cfg.yieldCapFraction,
+    yieldCapWindowSeconds: cfg.yieldCapWindowSeconds, yieldAlways: cfg.yieldAlways, yieldTimeoutSeconds: cfg.yieldTimeoutSeconds },
   log,
 });
 sched.paused = !!state.paused;
